@@ -6,6 +6,7 @@
 #include "precomp.hpp"
 #include "opencl_kernels_core.hpp"
 #include "stat.hpp"
+#include <omp.h>
 
 /****************************************************************************************\
 *                                         norm                                           *
@@ -600,8 +601,279 @@ static bool ipp_norm(Mat &src, int normType, Mat &mask, double &result)
 }  // ipp_norm()
 #endif  // HAVE_IPP
 
+inline uint64x2_t accumulate_square_u8(uint64x2_t acc_u64, uint8x16_t vec_u8)
+{
+    uint16x8_t low_u16 = vmovl_u8(vget_low_u8(vec_u8));
+    uint16x8_t high_u16 = vmovl_u8(vget_high_u8(vec_u8));
+
+    uint32x4_t sq_low_u32 = vmull_u16(vget_low_u16(low_u16), vget_low_u16(low_u16));
+    uint32x4_t sq_low_u32_2 = vmull_u16(vget_high_u16(low_u16), vget_high_u16(low_u16));
+
+    uint32x4_t sq_high_u32 = vmull_u16(vget_low_u16(high_u16), vget_low_u16(high_u16));
+    uint32x4_t sq_high_u32_2 = vmull_u16(vget_high_u16(high_u16), vget_high_u16(high_u16));
+
+    acc_u64 = vpadalq_u32(acc_u64, sq_low_u32);
+    acc_u64 = vpadalq_u32(acc_u64, sq_low_u32_2);
+    acc_u64 = vpadalq_u32(acc_u64, sq_high_u32);
+    acc_u64 = vpadalq_u32(acc_u64, sq_high_u32_2);
+
+    return acc_u64;
+}
+
+static inline uint32x4_t accumulate_sum_u8(uint32x4_t sum32, uint8x16_t data) {
+    uint16x8_t sum16 = vpaddlq_u8(data);
+    return vpadalq_u16(sum32, sum16);
+}
+
+static double kcv_norm_L1(cv::InputArray _src, cv::InputArray _mask)
+{
+    cv::Mat src = _src.getMat();
+    cv::Mat mask = _mask.getMat();
+
+    bool has_mask = !mask.empty();
+
+    const uint8_t *src_data = src.ptr<uint8_t>();
+    const uint8_t *mask_data = has_mask ? mask.ptr<uint8_t>() : nullptr;
+
+    const int cn = src.channels();
+    const size_t total_pixels = src.total();
+    uint64_t global_sum = 0;
+
+    int threads = getenvT("KCV_NORM_T", 16);
+
+#pragma omp parallel num_threads(threads)
+    {
+        int nthreads = omp_get_num_threads();
+        int tid = omp_get_thread_num();
+
+        uint32x4_t vec_sum = vdupq_n_u32(0);
+        uint64_t scalar_sum = 0;
+
+        if (!has_mask)
+        {
+            size_t total_bytes = total_pixels * cn;
+            size_t chunk_size = total_bytes / nthreads;
+            size_t start = tid * chunk_size;
+            size_t end = (tid == nthreads - 1) ? total_bytes : start + chunk_size;
+
+            size_t i = start;
+            size_t simd_end = start + ((end - start) / 16) * 16;
+
+            for (; i < simd_end; i += 16)
+            {
+                uint8x16_t v_data = vld1q_u8(src_data + i);
+                vec_sum = accumulate_sum_u8(vec_sum, v_data);
+            }
+
+            scalar_sum += vaddvq_u32(vec_sum);
+            for (; i < end; ++i)
+            {
+                scalar_sum += src_data[i];
+            }
+        }
+        else
+        {
+            size_t chunk_size = total_pixels / nthreads;
+            size_t start = tid * chunk_size;
+            size_t end = (tid == nthreads - 1) ? total_pixels : start + chunk_size;
+
+            size_t i = start;
+            size_t simd_end = start + ((end - start) / 16) * 16;
+            const uint8x16_t v_zero = vdupq_n_u8(0);
+
+            if (cn == 1)
+            {
+                for (; i < simd_end; i += 16)
+                {
+                    uint8x16_t m_val = vld1q_u8(mask_data + i);
+                    uint8x16_t mask_bool = vcgtq_u8(m_val, v_zero);
+                    uint8x16_t v_data = vld1q_u8(src_data + i);
+                    v_data = vandq_u8(v_data, mask_bool);
+                    vec_sum = accumulate_sum_u8(vec_sum, v_data);
+                }
+            }
+            else if (cn == 3)
+            {
+                for (; i < simd_end; i += 16)
+                {
+                    uint8x16_t m_val = vld1q_u8(mask_data + i);
+                    uint8x16_t mask_bool = vcgtq_u8(m_val, v_zero);
+
+                    uint8x16x3_t v_data3 = vld3q_u8(src_data + i * 3);
+                    v_data3.val[0] = vandq_u8(v_data3.val[0], mask_bool);
+                    v_data3.val[1] = vandq_u8(v_data3.val[1], mask_bool);
+                    v_data3.val[2] = vandq_u8(v_data3.val[2], mask_bool);
+
+                    vec_sum = accumulate_sum_u8(vec_sum, v_data3.val[0]);
+                    vec_sum = accumulate_sum_u8(vec_sum, v_data3.val[1]);
+                    vec_sum = accumulate_sum_u8(vec_sum, v_data3.val[2]);
+                }
+            }
+
+            scalar_sum += vaddvq_u32(vec_sum);
+
+            for (; i < end; ++i)
+            {
+                if (mask_data[i] > 0)
+                {
+                    for (int c = 0; c < cn; ++c)
+                        scalar_sum += src_data[i * cn + c];
+                }
+            }
+        }
+
+#pragma omp atomic
+        global_sum += scalar_sum;
+    }
+
+    return static_cast<double>(global_sum);
+}
+static double kcv_norm(InputArray _src, int normType, InputArray _mask)
+{
+
+    Mat src = _src.getMat();
+    Mat mask = _mask.getMat();
+
+    if (src.empty())
+        return 0.0;
+
+    CV_Assert(src.depth() == CV_8U);
+    CV_Assert(src.isContinuous());
+
+    bool has_mask = !mask.empty();
+    if (has_mask)
+    {
+        CV_Assert(mask.type() == CV_8UC1);
+        CV_Assert(mask.size() == src.size());
+        CV_Assert(mask.isContinuous());
+    }
+
+    if(normType == NORM_L1){
+        return kcv_norm_L1(_src, _mask);
+    }
+
+    const uint8_t *src_data = src.ptr<uint8_t>();
+    const uint8_t *mask_data = has_mask ? mask.ptr<uint8_t>() : nullptr;
+
+    int cn = src.channels();
+    size_t total_pixels = src.total();
+
+    uint64_t global_sq_sum = 0;
+
+    auto hsum_u64 = [](uint64x2_t x) -> uint64_t
+    {
+        return vaddvq_u64(x);
+    };
+
+    int threads = getenvT("KCV_NORM_T", 16);
+#pragma omp parallel num_threads(threads)
+    {
+        int nthreads = omp_get_num_threads();
+        int tid = omp_get_thread_num();
+
+        uint64x2_t vec_sq_sum = vdupq_n_u64(0);
+        uint64_t scalar_sq_sum = 0;
+
+        if (!has_mask)
+        {
+            size_t total_bytes = total_pixels * cn;
+
+            size_t chunk_size = total_bytes / nthreads;
+            size_t start = tid * chunk_size;
+            size_t end = (tid == nthreads - 1) ? total_bytes : start + chunk_size;
+
+            size_t i = start;
+            size_t simd_end = start + ((end - start) / 16) * 16;
+
+            for (; i < simd_end; i += 16)
+            {
+                uint8x16_t v_data = vld1q_u8(src_data + i);
+                vec_sq_sum = accumulate_square_u8(vec_sq_sum, v_data);
+            }
+
+            scalar_sq_sum += hsum_u64(vec_sq_sum);
+            for (; i < end; ++i)
+            {
+                uint64_t val = src_data[i];
+                scalar_sq_sum += val * val;
+            }
+        }
+        else
+        {
+            size_t chunk_size = total_pixels / nthreads;
+            size_t start = tid * chunk_size;
+            size_t end = (tid == nthreads - 1) ? total_pixels : start + chunk_size;
+
+            size_t i = start;
+            size_t simd_end = start + ((end - start) / 16) * 16;
+
+            const uint8x16_t zeros = vdupq_n_u8(0);
+
+            if (cn == 1)
+            {
+                for (; i < simd_end; i += 16)
+                {
+                    uint8x16_t m_val = vld1q_u8(mask_data + i);
+                    uint8x16_t mask_bool = vcgtq_u8(m_val, zeros);
+
+                    uint8x16_t v_data = vld1q_u8(src_data + i);
+
+                    v_data = vandq_u8(v_data, mask_bool);
+
+                    vec_sq_sum = accumulate_square_u8(vec_sq_sum, v_data);
+                }
+            }
+            else if (cn == 3)
+            {
+                for (; i < simd_end; i += 16)
+                {
+                    uint8x16_t m_val = vld1q_u8(mask_data + i);
+                    uint8x16_t mask_bool = vcgtq_u8(m_val, zeros);
+
+                    uint8x16x3_t pixels = vld3q_u8(src_data + i * 3);
+
+                    pixels.val[0] = vandq_u8(pixels.val[0], mask_bool);
+                    pixels.val[1] = vandq_u8(pixels.val[1], mask_bool);
+                    pixels.val[2] = vandq_u8(pixels.val[2], mask_bool);
+
+                    vec_sq_sum = accumulate_square_u8(vec_sq_sum, pixels.val[0]);
+                    vec_sq_sum = accumulate_square_u8(vec_sq_sum, pixels.val[1]);
+                    vec_sq_sum = accumulate_square_u8(vec_sq_sum, pixels.val[2]);
+                }
+            }
+
+            scalar_sq_sum += hsum_u64(vec_sq_sum);
+
+            for (; i < end; ++i)
+            {
+                if (mask_data[i] == 0)
+                    continue;
+
+                for (int c = 0; c < cn; ++c)
+                {
+                    uint64_t val = src_data[i * cn + c];
+                    scalar_sq_sum += val * val;
+                }
+            }
+        }
+
+#pragma omp atomic
+        global_sq_sum += scalar_sq_sum;
+    }
+    if( normType == NORM_L2 ){
+        return std::sqrt(static_cast<double>(global_sq_sum));
+    }
+    else if( normType == NORM_L2SQR ){
+        return static_cast<double>(global_sq_sum);
+    }
+    return std::sqrt(static_cast<double>(global_sq_sum));
+}
+
 double norm( InputArray _src, int normType, InputArray _mask )
 {
+    if(_src.depth() == CV_8U && (normType == NORM_L2 || normType == NORM_L2SQR || normType == NORM_L1)){
+        return kcv_norm(_src, normType, _mask);
+    }
     CV_INSTRUMENT_REGION();
 
     normType &= NORM_TYPE_MASK;
@@ -1076,7 +1348,11 @@ double norm( InputArray _src1, InputArray _src2, int normType, InputArray _mask 
 
     CV_CheckTypeEQ(_src1.type(), _src2.type(), "Input type mismatch");
     CV_Assert(_src1.sameSize(_src2));
-
+    if(_src1.depth() == CV_8U && _src2.depth() == CV_8U && normType == NORM_L2){
+        cv::Mat diff;
+        cv::absdiff(_src1, _src2, diff);
+        return kcv_norm(diff, normType, _mask);
+    }
 #if defined HAVE_OPENCL || defined HAVE_IPP
     double _result = 0;
 #endif

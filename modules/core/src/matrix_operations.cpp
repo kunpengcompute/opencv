@@ -280,23 +280,84 @@ cv::Scalar cv::trace( InputArray _m )
 
 ////////////////////////////////////// completeSymm /////////////////////////////////////////
 
-void cv::completeSymm( InputOutputArray _m, bool LtoR )
+void cv::completeSymm(InputOutputArray _m, bool LtoR)
 {
     CV_INSTRUMENT_REGION();
 
     Mat m = _m.getMat();
-    size_t step = m.step, esz = m.elemSize();
-    CV_Assert( m.dims <= 2 && m.rows == m.cols );
+    CV_Assert(m.dims <= 2 && m.rows == m.cols);
 
-    int rows = m.rows;
-    int j0 = 0, j1 = rows;
+    int n = m.rows;
+    size_t step = m.step;
+    size_t esz = m.elemSize();
+    uchar* data = m.data;
 
-    uchar* data = m.ptr();
-    for( int i = 0; i < rows; i++ )
+    const int BLOCK_SIZE = 32;
+
+    if (esz == 4)
     {
-        if( !LtoR ) j1 = i; else j0 = i+1;
-        for( int j = j0; j < j1; j++ )
-            memcpy(data + (i*step + j*esz), data + (j*step + i*esz), esz);
+        for (int i = 0; i < n; i += BLOCK_SIZE)
+        {
+            for (int j = 0; j < n; j += BLOCK_SIZE)
+            {
+                int i_limit = std::min(i + BLOCK_SIZE, n);
+                int j_limit = std::min(j + BLOCK_SIZE, n);
+
+                for (int ii = i; ii < i_limit; ++ii)
+                {
+                    int* row_i = (int*)(data + ii * step);
+                    for (int jj = std::max(j, LtoR ? ii + 1 : 0); jj < (LtoR ? j_limit : std::min(j_limit, ii)); ++jj)
+                    {
+                        int* row_j = (int*)(data + jj * step);
+                        if (LtoR) row_i[jj] = row_j[ii];
+                        else      row_j[ii] = row_i[jj];
+                    }
+                }
+            }
+        }
+    }
+    else if (esz == 8)
+    {
+        for (int i = 0; i < n; i += BLOCK_SIZE)
+        {
+            for (int j = 0; j < n; j += BLOCK_SIZE)
+            {
+                int i_limit = std::min(i + BLOCK_SIZE, n);
+                int j_limit = std::min(j + BLOCK_SIZE, n);
+
+                for (int ii = i; ii < i_limit; ++ii)
+                {
+                    int64* row_i = (int64*)(data + ii * step);
+                    for (int jj = std::max(j, LtoR ? ii + 1 : 0); jj < (LtoR ? j_limit : std::min(j_limit, ii)); ++jj)
+                    {
+                        int64* row_j = (int64*)(data + jj * step);
+                        if (LtoR) row_i[jj] = row_j[ii];
+                        else      row_j[ii] = row_i[jj];
+                    }
+                }
+            }
+        }
+    }
+    else
+    {
+        if (LtoR)
+        {
+            for (int i = 0; i < n; i++)
+            {
+                uchar* row_i = data + i * step;
+                for (int j = i + 1; j < n; j++)
+                    memcpy(row_i + j * esz, data + j * step + i * esz, esz);
+            }
+        }
+        else
+        {
+            for (int i = 0; i < n; i++)
+            {
+                uchar* row_i = data + i * step;
+                for (int j = 0; j < i; j++)
+                    memcpy(row_i + j * esz, data + j * step + i * esz, esz);
+            }
+        }
     }
 }
 

@@ -895,7 +895,7 @@ void Canny( InputArray _src, OutputArray _dst,
     // If Scharr filter: aperture size is 3, ksize2 is 1
     int ksize2 = aperture_size < 0 ? 1 : aperture_size / 2;
     // Minimum number of threads should be 1, maximum should not exceed number of CPU's, because of overhead
-    int numOfThreads = std::max(1, std::min(getNumThreads(), getNumberOfCPUs()));
+    int numOfThreads = getenvT("KCV_CANNY_T", 32);
     // Make a fallback for pictures with too few rows.
     int grainSize = src.rows / numOfThreads;
     int minGrainSize = 2 * (ksize2 + 1);

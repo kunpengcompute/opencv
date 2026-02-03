@@ -182,19 +182,37 @@ HoughLinesStandard( InputArray src, OutputArray lines, int type,
     // create sin and cos table
     createTrigTable( numangle, min_theta, theta,
                      irho, tabSin, tabCos);
-
-    // stage 1. fill accumulator
+    std::vector<int> nz_x, nz_y;
+    nz_x.reserve(width * height / 20);
+    nz_y.reserve(width * height / 20);
     for( i = 0; i < height; i++ )
+    {
+        const uchar* ptr = image + i * step;
         for( j = 0; j < width; j++ )
         {
-            if( image[i * step + j] != 0 )
-                for(int n = 0; n < numangle; n++ )
-                {
-                    int r = cvRound( j * tabCos[n] + i * tabSin[n] );
-                    r += (numrho - 1) / 2;
-                    accum[(n+1) * (numrho+2) + r+1]++;
-                }
+            if( ptr[j] != 0 )
+            {
+                nz_x.push_back(j);
+                nz_y.push_back(i);
+            }
         }
+    }
+
+    int nz_count = (int)nz_x.size();
+    int threads = getenvT("KCV_HOUGHTLINES_T", 32);
+    #pragma omp parallel for schedule(static) num_threads(threads) if(nz_count > 1000)
+    for( int n = 0; n < numangle; n++ )
+    {
+        const float n_sin = tabSin[n];
+        const float n_cos = tabCos[n];
+        int* accum_row = accum + (n + 1) * (numrho + 2);
+        for( int k = 0; k < nz_count; k++ )
+        {
+            int r = cvRound( nz_x[k] * n_cos + nz_y[k] * n_sin );
+            r += (numrho - 1) / 2;
+            accum_row[r + 1]++;
+        }
+    }
 
     // stage 2. find local maximums
     findLocalMaximums( numrho, numangle, threshold, accum, _sort_buf );
@@ -1649,7 +1667,7 @@ static void HoughCirclesGradient(InputArray _image, OutputArray _circles,
     Canny(dx, dy, edges, std::max(1, cannyThreshold / 2), cannyThreshold, false);
 
     Mutex mtx;
-    int numThreads = std::max(1, getNumThreads());
+    int numThreads = getenvT("KCV_HOUGHCIRCLES_THREADS", 16);
     std::vector<Mat> accumVec;
     NZPointSet nz(_image.rows(), _image.cols());
     parallel_for_(Range(0, edges.rows),
