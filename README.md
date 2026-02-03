@@ -126,7 +126,7 @@ OpenCV中文文档：https://docs.opencv.ac.cn/4.10.0/
 
 ## License
 
-本项目采用GNU LESSER GENERAL PUBLIC LICENSE 2.1许可证。详见[LICENSE](https://gitcode.com/boostkit/opencv/blob/master/LICENSE.md)文件。
+本项目采用Apache License Version 2.0许可证。详见[LICENSE](https://gitcode.com/boostkit/opencv/blob/master/LICENSE.md)文件。
 
 ## 贡献声明
 
