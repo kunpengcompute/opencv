@@ -1149,7 +1149,11 @@ namespace cv{
             //P[0] = 0;
 
             cv::Range range2(0, divUp(h, 2));
-            const double nParallelStripes = std::max(1, std::min(h / 2, getNumThreads() * 4));
+
+            const int threads = getNumThreads();
+            const int threadsByData = std::max(1, h / 64);
+            const int threadsByLimit = std::min(threads, 64);
+            const double nParallelStripes = std::min(threadsByData, threadsByLimit);
 
             //First scan
             cv::parallel_for_(range2, FirstScan(img, imgLabels, P.data(), chunksSizeAndLabels.data()), nParallelStripes);
@@ -1778,7 +1782,11 @@ namespace cv{
             //P[0] = 0;
 
             cv::Range range2(0, divUp(h, 2));
-            const double nParallelStripes = std::max(1, std::min(h / 2, getNumThreads() * 4));
+
+            const int threads = getNumThreads();
+            const int threadsByData = std::max(1, h / 64);
+            const int threadsByLimit = std::min(threads, 64);
+            const double nParallelStripes = std::min(threadsByData, threadsByLimit);
 
             LabelT nLabels = 1;
 
