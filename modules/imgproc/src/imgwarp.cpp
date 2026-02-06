@@ -3362,7 +3362,7 @@ void warpPerspective(int src_type,
 
     Range range(0, dst.rows);
     WarpPerspectiveInvoker invoker(src, dst, M, interpolation, borderType, Scalar(borderValue[0], borderValue[1], borderValue[2], borderValue[3]));
-    parallel_for_(range, invoker, dst.total()/(double)(1<<16));
+    parallel_for_(range, invoker, dst.total()/(double)(1<<12));
 }
 
 } // hal::

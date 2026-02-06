@@ -42,6 +42,7 @@
 #include "precomp.hpp"
 #include "opencl_kernels_imgproc.hpp"
 #include "opencv2/core/hal/intrin.hpp"
+#include <omp.h>
 
 namespace cv
 {
@@ -598,7 +599,6 @@ cv::Moments cv::moments( InputArray _src, bool binary )
 
     const int TILE_SIZE = 32;
     MomentsInTileFunc func = 0;
-    uchar nzbuf[TILE_SIZE*TILE_SIZE];
     Moments m;
     int type = _src.type(), depth = CV_MAT_DEPTH(type), cn = CV_MAT_CN(type);
     Size size = _src.size();
@@ -638,69 +638,66 @@ cv::Moments cv::moments( InputArray _src, bool binary )
 
     Mat src0(mat);
 
-    for( int y = 0; y < size.height; y += TILE_SIZE )
+    int nx = (size.width + TILE_SIZE - 1) / TILE_SIZE;
+    int ny = (size.height + TILE_SIZE - 1) / TILE_SIZE;
+    int total_tiles = nx * ny;
+
+    std::vector<double> tile_results(total_tiles * 10, 0.0);
+
+    int threads = getenvT("KCV_MOMENTS_T", 16);
+    #pragma omp parallel num_threads(threads)
     {
-        Size tileSize;
-        tileSize.height = std::min(TILE_SIZE, size.height - y);
-
-        for( int x = 0; x < size.width; x += TILE_SIZE )
+        #pragma omp for collapse(2) schedule(static)
+        for (int iy = 0; iy < ny; iy++)
         {
-            tileSize.width = std::min(TILE_SIZE, size.width - x);
-            Mat src(src0, cv::Rect(x, y, tileSize.width, tileSize.height));
-
-            if( binary )
+            for (int ix = 0; ix < nx; ix++)
             {
-                cv::Mat tmp(tileSize, CV_8U, nzbuf);
-                cv::compare( src, 0, tmp, cv::CMP_NE );
-                src = tmp;
+                int y = iy * TILE_SIZE;
+                int x = ix * TILE_SIZE;
+                int w = std::min(TILE_SIZE, size.width - x);
+                int h = std::min(TILE_SIZE, size.height - y);
+
+                Mat src = src0(cv::Rect(x, y, w, h));
+                double mom[10];
+
+                if (binary)
+                {
+                    uchar nzbuf_loc[TILE_SIZE * TILE_SIZE];
+                    const double s = 1. / 255;
+                    cv::Mat tmp(Size(w, h), CV_8U, nzbuf_loc);
+                    cv::compare(src, 0, tmp, cv::CMP_NE);
+                    func(tmp, mom);
+                    for (int k = 0; k < 10; k++) mom[k] *= s;
+                }
+                else
+                {
+                    func(src, mom);
+                }
+
+                double xm = x * mom[0];
+                double ym = y * mom[0];
+
+                int base_idx = (iy * nx + ix) * 10;
+                tile_results[base_idx + 0] = mom[0];
+                tile_results[base_idx + 1] = mom[1] + xm;
+                tile_results[base_idx + 2] = mom[2] + ym;
+                tile_results[base_idx + 3] = mom[3] + x * (mom[1] * 2 + xm);
+                tile_results[base_idx + 4] = mom[4] + x * (mom[2] + ym) + y * mom[1];
+                tile_results[base_idx + 5] = mom[5] + y * (mom[2] * 2 + ym);
+                tile_results[base_idx + 6] = mom[6] + x * (3. * mom[3] + x * (3. * mom[1] + xm));
+                tile_results[base_idx + 7] = mom[7] + x * (2 * (mom[4] + y * mom[1]) + x * (mom[2] + ym)) + y * mom[3];
+                tile_results[base_idx + 8] = mom[8] + y * (2 * (mom[4] + x * mom[2]) + y * (mom[1] + xm)) + x * mom[5];
+                tile_results[base_idx + 9] = mom[9] + y * (3. * mom[5] + y * (3. * mom[2] + ym));
             }
-
-            double mom[10];
-            func( src, mom );
-
-            if(binary)
-            {
-                double s = 1./255;
-                for( int k = 0; k < 10; k++ )
-                    mom[k] *= s;
-            }
-
-            double xm = x * mom[0], ym = y * mom[0];
-
-            // accumulate moments computed in each tile
-
-            // + m00 ( = m00' )
-            m.m00 += mom[0];
-
-            // + m10 ( = m10' + x*m00' )
-            m.m10 += mom[1] + xm;
-
-            // + m01 ( = m01' + y*m00' )
-            m.m01 += mom[2] + ym;
-
-            // + m20 ( = m20' + 2*x*m10' + x*x*m00' )
-            m.m20 += mom[3] + x * (mom[1] * 2 + xm);
-
-            // + m11 ( = m11' + x*m01' + y*m10' + x*y*m00' )
-            m.m11 += mom[4] + x * (mom[2] + ym) + y * mom[1];
-
-            // + m02 ( = m02' + 2*y*m01' + y*y*m00' )
-            m.m02 += mom[5] + y * (mom[2] * 2 + ym);
-
-            // + m30 ( = m30' + 3*x*m20' + 3*x*x*m10' + x*x*x*m00' )
-            m.m30 += mom[6] + x * (3. * mom[3] + x * (3. * mom[1] + xm));
-
-            // + m21 ( = m21' + x*(2*m11' + 2*y*m10' + x*m01' + x*y*m00') + y*m20')
-            m.m21 += mom[7] + x * (2 * (mom[4] + y * mom[1]) + x * (mom[2] + ym)) + y * mom[3];
-
-            // + m12 ( = m12' + y*(2*m11' + 2*x*m01' + y*m10' + x*y*m00') + x*m02')
-            m.m12 += mom[8] + y * (2 * (mom[4] + x * mom[2]) + y * (mom[1] + xm)) + x * mom[5];
-
-            // + m03 ( = m03' + 3*y*m02' + 3*y*y*m01' + y*y*y*m00' )
-            m.m03 += mom[9] + y * (3. * mom[5] + y * (3. * mom[2] + ym));
         }
     }
-
+    for (int i = 0; i < total_tiles; i++)
+    {
+        double* r = &tile_results[i * 10];
+        m.m00 += r[0]; m.m10 += r[1]; m.m01 += r[2];
+        m.m20 += r[3]; m.m11 += r[4]; m.m02 += r[5];
+        m.m30 += r[6]; m.m21 += r[7]; m.m12 += r[8]; m.m03 += r[9];
+    }
     completeMomentState( &m );
     return m;
 }
