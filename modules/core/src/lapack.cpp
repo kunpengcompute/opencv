@@ -123,126 +123,258 @@ JacobiImpl_( _Tp* A, size_t astep, _Tp* W, _Tp* V, size_t vstep, int n, uchar* b
         vstep /= sizeof(V[0]);
         for( i = 0; i < n; i++ )
         {
+            _Tp* Vi = V + i * vstep;
             for( j = 0; j < n; j++ )
-                V[i*vstep + j] = (_Tp)0;
-            V[i*vstep + i] = (_Tp)1;
+                Vi[j] = (_Tp)0;
+            Vi[i] = (_Tp)1;
         }
     }
 
-    int iters, maxIters = n*n*30;
+    const int maxIters = n * n * 30;
 
     int* indR = (int*)alignPtr(buf, sizeof(int));
     int* indC = indR + n;
-    _Tp mv = (_Tp)0;
+    _Tp mv;
 
     for( k = 0; k < n; k++ )
     {
-        W[k] = A[(astep + 1)*k];
+        W[k] = A[(astep + 1) * k];
         if( k < n - 1 )
         {
-            for( m = k+1, mv = std::abs(A[astep*k + m]), i = k+2; i < n; i++ )
+            const _Tp* Ak = A + astep * k;
+            m = k + 1;
+            mv = std::abs(Ak[m]);
+            for( i = k + 2; i < n; i++ )
             {
-                _Tp val = std::abs(A[astep*k+i]);
+                _Tp val = std::abs(Ak[i]);
                 if( mv < val )
-                    mv = val, m = i;
+                {
+                    mv = val;
+                    m = i;
+                }
             }
             indR[k] = m;
         }
         if( k > 0 )
         {
-            for( m = 0, mv = std::abs(A[k]), i = 1; i < k; i++ )
+            m = 0;
+            mv = std::abs(A[k]);
+            for( i = 1; i < k; i++ )
             {
-                _Tp val = std::abs(A[astep*i+k]);
+                _Tp val = std::abs(A[astep * i + k]);
                 if( mv < val )
-                    mv = val, m = i;
+                {
+                    mv = val;
+                    m = i;
+                }
             }
             indC[k] = m;
         }
     }
 
-    if( n > 1 ) for( iters = 0; iters < maxIters; iters++ )
+    if( n <= 1 )
+        return true;
+
+    for( int iters = 0; iters < maxIters; iters++ )
     {
-        // find index (k,l) of pivot p
-        for( k = 0, mv = std::abs(A[indR[0]]), i = 1; i < n-1; i++ )
+        k = 0;
+        mv = std::abs(A[indR[0]]);
+        for( i = 1; i < n - 1; i++ )
         {
-            _Tp val = std::abs(A[astep*i + indR[i]]);
+            _Tp val = std::abs(A[astep * i + indR[i]]);
             if( mv < val )
-                mv = val, k = i;
+            {
+                mv = val;
+                k = i;
+            }
         }
         int l = indR[k];
         for( i = 1; i < n; i++ )
         {
-            _Tp val = std::abs(A[astep*indC[i] + i]);
+            _Tp val = std::abs(A[astep * indC[i] + i]);
             if( mv < val )
-                mv = val, k = indC[i], l = i;
+            {
+                mv = val;
+                k = indC[i];
+                l = i;
+            }
         }
+        _Tp* Ak = A + astep * k;
+        _Tp* Al = A + astep * l;
 
-        _Tp p = A[astep*k + l];
+        _Tp p = Ak[l];
         if( std::abs(p) <= eps )
             break;
-        _Tp y = (_Tp)((W[l] - W[k])*0.5);
+        _Tp y = (_Tp)((W[l] - W[k]) * 0.5);
         _Tp t = std::abs(y) + hypot(p, y);
-        _Tp s = hypot(p, t);
-        _Tp c = t/s;
-        s = p/s; t = (p/t)*p;
-        if( y < 0 )
-            s = -s, t = -t;
-        A[astep*k + l] = 0;
+        _Tp s_val = hypot(p, t);
+        _Tp c = t / s_val;
+        _Tp s = p / s_val;
+        t = (p / t) * p;
 
+        if( y < 0 )
+        {
+            s = -s;
+            t = -t;
+        }
+        Ak[l] = 0;
         W[k] -= t;
         W[l] += t;
 
         _Tp a0, b0;
 
-#undef rotate
-#define rotate(v0, v1) a0 = v0, b0 = v1, v0 = a0*c - b0*s, v1 = a0*s + b0*c
-
-        // rotate rows and columns k and l
         for( i = 0; i < k; i++ )
-            rotate(A[astep*i+k], A[astep*i+l]);
-        for( i = k+1; i < l; i++ )
-            rotate(A[astep*k+i], A[astep*i+l]);
-        for( i = l+1; i < n; i++ )
-            rotate(A[astep*k+i], A[astep*l+i]);
-
-        // rotate eigenvectors
-        if( V )
-            for( i = 0; i < n; i++ )
-                rotate(V[vstep*k+i], V[vstep*l+i]);
-
-#undef rotate
-
-        for( j = 0; j < 2; j++ )
         {
-            int idx = j == 0 ? k : l;
-            if( idx < n - 1 )
+            _Tp* Ai = A + astep * i;
+            a0 = Ai[k];
+            b0 = Ai[l];
+            Ai[k] = a0 * c - b0 * s;
+            Ai[l] = a0 * s + b0 * c;
+        }
+
+        for( i = k + 1; i < l; i++ )
+        {
+            a0 = Ak[i];
+            b0 = A[astep * i + l];
+            Ak[i] = a0 * c - b0 * s;
+            A[astep * i + l] = a0 * s + b0 * c;
+        }
+
+        int i_end = l + 1 + ((n - l - 1) & ~3);
+        for( i = l + 1; i < i_end; i += 4 )
+        {
+            a0 = Ak[i];
+            b0 = Al[i];
+            Ak[i] = a0 * c - b0 * s;
+            Al[i] = a0 * s + b0 * c;
+
+            a0 = Ak[i + 1];
+            b0 = Al[i + 1];
+            Ak[i + 1] = a0 * c - b0 * s;
+            Al[i + 1] = a0 * s + b0 * c;
+
+            a0 = Ak[i + 2];
+            b0 = Al[i + 2];
+            Ak[i + 2] = a0 * c - b0 * s;
+            Al[i + 2] = a0 * s + b0 * c;
+
+            a0 = Ak[i + 3];
+            b0 = Al[i + 3];
+            Ak[i + 3] = a0 * c - b0 * s;
+            Al[i + 3] = a0 * s + b0 * c;
+        }
+        for( ; i < n; i++ )
+        {
+            a0 = Ak[i];
+            b0 = Al[i];
+            Ak[i] = a0 * c - b0 * s;
+            Al[i] = a0 * s + b0 * c;
+        }
+
+        if( V )
+        {
+            _Tp* Vk = V + vstep * k;
+            _Tp* Vl = V + vstep * l;
+
+            int n4 = n & ~3;
+            for( i = 0; i < n4; i += 4 )
             {
-                for( m = idx+1, mv = std::abs(A[astep*idx + m]), i = idx+2; i < n; i++ )
-                {
-                    _Tp val = std::abs(A[astep*idx+i]);
-                    if( mv < val )
-                        mv = val, m = i;
-                }
-                indR[idx] = m;
+                a0 = Vk[i];
+                b0 = Vl[i];
+                Vk[i] = a0 * c - b0 * s;
+                Vl[i] = a0 * s + b0 * c;
+
+                a0 = Vk[i + 1];
+                b0 = Vl[i + 1];
+                Vk[i + 1] = a0 * c - b0 * s;
+                Vl[i + 1] = a0 * s + b0 * c;
+
+                a0 = Vk[i + 2];
+                b0 = Vl[i + 2];
+                Vk[i + 2] = a0 * c - b0 * s;
+                Vl[i + 2] = a0 * s + b0 * c;
+
+                a0 = Vk[i + 3];
+                b0 = Vl[i + 3];
+                Vk[i + 3] = a0 * c - b0 * s;
+                Vl[i + 3] = a0 * s + b0 * c;
             }
-            if( idx > 0 )
+            for( ; i < n; i++ )
             {
-                for( m = 0, mv = std::abs(A[idx]), i = 1; i < idx; i++ )
-                {
-                    _Tp val = std::abs(A[astep*i+idx]);
-                    if( mv < val )
-                        mv = val, m = i;
-                }
-                indC[idx] = m;
+                a0 = Vk[i];
+                b0 = Vl[i];
+                Vk[i] = a0 * c - b0 * s;
+                Vl[i] = a0 * s + b0 * c;
             }
+        }
+
+        if( k < n - 1 )
+        {
+            m = k + 1;
+            mv = std::abs(Ak[m]);
+            for( i = k + 2; i < n; i++ )
+            {
+                _Tp val = std::abs(Ak[i]);
+                if( mv < val )
+                {
+                    mv = val;
+                    m = i;
+                }
+            }
+            indR[k] = m;
+        }
+        if( k > 0 )
+        {
+            m = 0;
+            mv = std::abs(A[k]);
+            for( i = 1; i < k; i++ )
+            {
+                _Tp val = std::abs(A[astep * i + k]);
+                if( mv < val )
+                {
+                    mv = val;
+                    m = i;
+                }
+            }
+            indC[k] = m;
+        }
+
+        if( l < n - 1 )
+        {
+            m = l + 1;
+            mv = std::abs(Al[m]);
+            for( i = l + 2; i < n; i++ )
+            {
+                _Tp val = std::abs(Al[i]);
+                if( mv < val )
+                {
+                    mv = val;
+                    m = i;
+                }
+            }
+            indR[l] = m;
+        }
+        if( l > 0 )
+        {
+            m = 0;
+            mv = std::abs(A[l]);
+            for( i = 1; i < l; i++ )
+            {
+                _Tp val = std::abs(A[astep * i + l]);
+                if( mv < val )
+                {
+                    mv = val;
+                    m = i;
+                }
+            }
+            indC[l] = m;
         }
     }
 
-    // sort eigenvalues & eigenvectors
-    for( k = 0; k < n-1; k++ )
+    for( k = 0; k < n - 1; k++ )
     {
         m = k;
-        for( i = k+1; i < n; i++ )
+        for( i = k + 1; i < n; i++ )
         {
             if( W[m] < W[i] )
                 m = i;
@@ -251,8 +383,21 @@ JacobiImpl_( _Tp* A, size_t astep, _Tp* W, _Tp* V, size_t vstep, int n, uchar* b
         {
             std::swap(W[m], W[k]);
             if( V )
-                for( i = 0; i < n; i++ )
-                    std::swap(V[vstep*m + i], V[vstep*k + i]);
+            {
+                _Tp* Vm = V + vstep * m;
+                _Tp* Vk_ptr = V + vstep * k;
+
+                int n4 = n & ~3;
+                for( i = 0; i < n4; i += 4 )
+                {
+                    std::swap(Vm[i], Vk_ptr[i]);
+                    std::swap(Vm[i + 1], Vk_ptr[i + 1]);
+                    std::swap(Vm[i + 2], Vk_ptr[i + 2]);
+                    std::swap(Vm[i + 3], Vk_ptr[i + 3]);
+                }
+                for( ; i < n; i++ )
+                    std::swap(Vm[i], Vk_ptr[i]);
+            }
         }
     }
 

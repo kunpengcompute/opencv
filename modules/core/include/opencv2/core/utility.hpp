@@ -584,6 +584,7 @@ public:
 
 @ingroup core_parallel
 */
+CV_EXPORTS int getenvT(std::string key, int default_value);
 CV_EXPORTS void parallel_for_(const Range& range, const ParallelLoopBody& body, double nstripes=-1.);
 
 //! @ingroup core_parallel

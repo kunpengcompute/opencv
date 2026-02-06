@@ -1001,6 +1001,87 @@ static void morphOp( int op, InputArray _src, OutputArray _dst,
                (src.isSubmatrix() && !isolated));
 }
 
+static void kcv_erode(InputArray _src, OutputArray _dst, InputArray _kernel,
+                      Point anchor, int iterations, int borderType,
+                      const Scalar &borderValue)
+{
+
+    Mat src_mat = _src.getMat();
+    Mat kernel = _kernel.getMat();
+
+    if (anchor.x == -1 && anchor.y == -1)
+    {
+        anchor = Point(kernel.cols / 2, kernel.rows / 2);
+    }
+
+    struct Offset
+    {
+        int dy, dx_cn;
+    };
+    std::vector<Offset> offsets;
+    int cn = src_mat.channels();
+    for (int i = 0; i < kernel.rows; i++)
+    {
+        const uchar *kptr = kernel.ptr<uchar>(i);
+        for (int j = 0; j < kernel.cols; j++)
+        {
+            if (kptr[j] != 0)
+            {
+                offsets.push_back({i - anchor.y, (j - anchor.x) * cn});
+            }
+        }
+    }
+
+    Mat current_src = src_mat;
+    for (int iter = 0; iter < iterations; iter++)
+    {
+        _dst.create(src_mat.size(), src_mat.type());
+        Mat dst_mat = _dst.getMat();
+        int top = anchor.y;
+        int bottom = kernel.rows - anchor.y - 1;
+        int left = anchor.x;
+        int right = kernel.cols - anchor.x - 1;
+
+        Mat padded;
+        copyMakeBorder(current_src, padded, top, bottom, left, right, borderType, borderValue);
+
+        int rows = dst_mat.rows;
+        int cols_bytes = dst_mat.cols * cn;
+        int p_step = (int)padded.step;
+
+#pragma omp parallel for schedule(static) num_threads(getenvT("KCV_ERODE_T", 32))
+        for (int i = 0; i < rows; i++)
+        {
+            const uchar *p_row_base = padded.ptr<uchar>(i + top) + (left * cn);
+            uchar *d_ptr = dst_mat.ptr<uchar>(i);
+
+            int j = 0;
+            for (; j <= cols_bytes - 16; j += 16)
+            {
+                uint8x16_t min_v = vdupq_n_u8(255);
+                for (const auto &off : offsets)
+                {
+                    uint8x16_t data = vld1q_u8(p_row_base + off.dy * p_step + j + off.dx_cn);
+                    min_v = vminq_u8(min_v, data);
+                }
+                vst1q_u8(d_ptr + j, min_v);
+            }
+
+            for (; j < cols_bytes; j++)
+            {
+                uchar min_v = 255;
+                for (const auto &off : offsets)
+                {
+                    uchar val = *(p_row_base + off.dy * p_step + j + off.dx_cn);
+                    if (val < min_v)
+                        min_v = val;
+                }
+                d_ptr[j] = min_v;
+            }
+        }
+        current_src = dst_mat;
+    }
+}
 void erode( InputArray src, OutputArray dst, InputArray kernel,
                 Point anchor, int iterations,
                 int borderType, const Scalar& borderValue )
@@ -1008,6 +1089,11 @@ void erode( InputArray src, OutputArray dst, InputArray kernel,
     CV_INSTRUMENT_REGION();
 
     CV_Assert(!src.empty());
+    if (src.depth() == CV_8U)
+    {
+        kcv_erode(src, dst, kernel, anchor, iterations, borderType, borderValue == morphologyDefaultBorderValue() ? Scalar(255, 255, 255) : borderValue);
+        return;
+    }
 
     morphOp( MORPH_ERODE, src, dst, kernel, anchor, iterations, borderType, borderValue );
 }

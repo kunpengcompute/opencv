@@ -122,8 +122,164 @@ static bool ipp_mean( Mat &src, Mat &mask, Scalar &ret )
 }
 #endif
 
+#include <omp.h>
+Scalar kcv_mean(InputArray _src, InputArray _mask)
+{
+    Mat img = _src.getMat();
+    Mat mask = _mask.getMat();
+
+    CV_Assert(img.type() == CV_8UC3);
+    CV_Assert(img.isContinuous());
+
+    bool has_mask = !mask.empty();
+    if (has_mask)
+    {
+        CV_Assert(mask.type() == CV_8UC1);
+        CV_Assert(mask.size() == img.size());
+        CV_Assert(mask.isContinuous());
+    }
+
+    const uint8_t *data = img.ptr<uint8_t>();
+    const uint8_t *mask_data = has_mask ? mask.ptr<uint8_t>() : nullptr;
+
+    size_t total_pixels = img.total();
+
+    uint64_t global_total_c0 = 0;
+    uint64_t global_total_c1 = 0;
+    uint64_t global_total_c2 = 0;
+    uint64_t global_valid_pixels = 0;
+
+    auto hsum_u32 = [](uint32x4_t x) -> uint64_t
+    {
+        return vaddlvq_u32(x);
+    };
+    int threads = getenvT("KCV_MEAN_T", 16);
+    #pragma omp parallel num_threads(threads)
+    {
+        int nthreads = omp_get_num_threads();
+        int tid = omp_get_thread_num();
+
+        size_t chunk_size = total_pixels / nthreads;
+        size_t start = tid * chunk_size;
+        size_t end = (tid == nthreads - 1) ? total_pixels : start + chunk_size;
+
+        uint32x4_t sum_c0 = vdupq_n_u32(0);
+        uint32x4_t sum_c1 = vdupq_n_u32(0);
+        uint32x4_t sum_c2 = vdupq_n_u32(0);
+        uint32x4_t vec_valid_count = vdupq_n_u32(0);
+
+        size_t i = start;
+        size_t simd_loop_end = start + ((end - start) / 16) * 16;
+
+        if (!has_mask)
+        {
+            for (; i < simd_loop_end; i += 16)
+            {
+                uint8x16x3_t pixels = vld3q_u8(data + i * 3);
+
+                uint16x8_t c0_low = vmovl_u8(vget_low_u8(pixels.val[0]));
+                uint16x8_t c0_high = vmovl_u8(vget_high_u8(pixels.val[0]));
+                sum_c0 = vaddq_u32(sum_c0, vaddl_u16(vget_low_u16(c0_low), vget_high_u16(c0_low)));
+                sum_c0 = vaddq_u32(sum_c0, vaddl_u16(vget_low_u16(c0_high), vget_high_u16(c0_high)));
+
+                uint16x8_t c1_low = vmovl_u8(vget_low_u8(pixels.val[1]));
+                uint16x8_t c1_high = vmovl_u8(vget_high_u8(pixels.val[1]));
+                sum_c1 = vaddq_u32(sum_c1, vaddl_u16(vget_low_u16(c1_low), vget_high_u16(c1_low)));
+                sum_c1 = vaddq_u32(sum_c1, vaddl_u16(vget_low_u16(c1_high), vget_high_u16(c1_high)));
+
+                uint16x8_t c2_low = vmovl_u8(vget_low_u8(pixels.val[2]));
+                uint16x8_t c2_high = vmovl_u8(vget_high_u8(pixels.val[2]));
+                sum_c2 = vaddq_u32(sum_c2, vaddl_u16(vget_low_u16(c2_low), vget_high_u16(c2_low)));
+                sum_c2 = vaddq_u32(sum_c2, vaddl_u16(vget_low_u16(c2_high), vget_high_u16(c2_high)));
+            }
+        }
+        else
+        {
+            const uint8x16_t zeros = vdupq_n_u8(0);
+            const uint8x16_t ones = vdupq_n_u8(1);
+
+            for (; i < simd_loop_end; i += 16)
+            {
+                uint8x16_t m_val = vld1q_u8(mask_data + i);
+                uint8x16_t mask_bool = vcgtq_u8(m_val, zeros);
+
+                uint8x16_t count_contrib = vandq_u8(mask_bool, ones);
+                uint16x8_t cnt_low = vmovl_u8(vget_low_u8(count_contrib));
+                uint16x8_t cnt_high = vmovl_u8(vget_high_u8(count_contrib));
+                vec_valid_count = vaddq_u32(vec_valid_count, vaddl_u16(vget_low_u16(cnt_low), vget_high_u16(cnt_low)));
+                vec_valid_count = vaddq_u32(vec_valid_count, vaddl_u16(vget_low_u16(cnt_high), vget_high_u16(cnt_high)));
+
+                uint8x16x3_t pixels = vld3q_u8(data + i * 3);
+
+                pixels.val[0] = vandq_u8(pixels.val[0], mask_bool);
+                pixels.val[1] = vandq_u8(pixels.val[1], mask_bool);
+                pixels.val[2] = vandq_u8(pixels.val[2], mask_bool);
+
+                uint16x8_t c0_low = vmovl_u8(vget_low_u8(pixels.val[0]));
+                uint16x8_t c0_high = vmovl_u8(vget_high_u8(pixels.val[0]));
+                sum_c0 = vaddq_u32(sum_c0, vaddl_u16(vget_low_u16(c0_low), vget_high_u16(c0_low)));
+                sum_c0 = vaddq_u32(sum_c0, vaddl_u16(vget_low_u16(c0_high), vget_high_u16(c0_high)));
+
+                uint16x8_t c1_low = vmovl_u8(vget_low_u8(pixels.val[1]));
+                uint16x8_t c1_high = vmovl_u8(vget_high_u8(pixels.val[1]));
+                sum_c1 = vaddq_u32(sum_c1, vaddl_u16(vget_low_u16(c1_low), vget_high_u16(c1_low)));
+                sum_c1 = vaddq_u32(sum_c1, vaddl_u16(vget_low_u16(c1_high), vget_high_u16(c1_high)));
+
+                uint16x8_t c2_low = vmovl_u8(vget_low_u8(pixels.val[2]));
+                uint16x8_t c2_high = vmovl_u8(vget_high_u8(pixels.val[2]));
+                sum_c2 = vaddq_u32(sum_c2, vaddl_u16(vget_low_u16(c2_low), vget_high_u16(c2_low)));
+                sum_c2 = vaddq_u32(sum_c2, vaddl_u16(vget_low_u16(c2_high), vget_high_u16(c2_high)));
+            }
+        }
+
+        uint64_t thread_c0 = hsum_u32(sum_c0);
+        uint64_t thread_c1 = hsum_u32(sum_c1);
+        uint64_t thread_c2 = hsum_u32(sum_c2);
+
+        uint64_t thread_valid_count = 0;
+        if (!has_mask) {
+            thread_valid_count = (i - start);
+        } else {
+            thread_valid_count = hsum_u32(vec_valid_count);
+        }
+
+        for (; i < end; ++i)
+        {
+            if (has_mask && mask_data[i] == 0) continue;
+
+            thread_c0 += data[i * 3 + 0];
+            thread_c1 += data[i * 3 + 1];
+            thread_c2 += data[i * 3 + 2];
+            thread_valid_count++;
+        }
+
+        #pragma omp atomic
+        global_total_c0 += thread_c0;
+
+        #pragma omp atomic
+        global_total_c1 += thread_c1;
+
+        #pragma omp atomic
+        global_total_c2 += thread_c2;
+
+        #pragma omp atomic
+        global_valid_pixels += thread_valid_count;
+    }
+
+    if (global_valid_pixels == 0) return cv::Scalar(0, 0, 0);
+
+    double N = static_cast<double>(global_valid_pixels);
+    double mean_c0 = global_total_c0 / N;
+    double mean_c1 = global_total_c1 / N;
+    double mean_c2 = global_total_c2 / N;
+
+    return cv::Scalar(mean_c0, mean_c1, mean_c2);
+}
 Scalar mean(InputArray _src, InputArray _mask)
 {
+    if(_src.depth() == CV_8U || _src.channels() <= 3){
+        return  kcv_mean(_src, _mask);
+    }
     CV_INSTRUMENT_REGION();
 
     Mat src = _src.getMat(), mask = _mask.getMat();

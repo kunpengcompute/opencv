@@ -10,10 +10,87 @@ namespace cv { namespace hal {
 /****************************************************************************************\
 *                     LU & Cholesky implementation for small matrices                    *
 \****************************************************************************************/
+template<typename _Tp> static inline int
+LUImpl_SIMD(_Tp* A, size_t astep, int m, _Tp* b, size_t bstep, int n, _Tp eps)
+{
+    int i, j, k, p = 1;
+    astep /= sizeof(_Tp);
+    bstep /= sizeof(_Tp);
 
+    for( i = 0; i < m; i++ )
+    {
+        k = i;
+        _Tp maxVal = std::abs(A[i * astep + i]);
+        for (j = i + 1; j < m; j++) {
+            _Tp val = std::abs(A[j * astep + i]);
+            if (val > maxVal) {
+                maxVal = val;
+                k = j;
+            }
+        }
+
+        if( maxVal < eps ) return 0;
+
+        if( k != i )
+        {
+            _Tp* rowI = A + i * astep;
+            _Tp* rowK = A + k * astep;
+            for (j = i; j < m; j++) std::swap(rowI[j], rowK[j]);
+
+            if (b) {
+                _Tp* bI = b + i * bstep;
+                _Tp* bK = b + k * bstep;
+                for (j = 0; j < n; j++) std::swap(bI[j], bK[j]);
+            }
+            p = -p;
+        }
+
+        _Tp pivotInv = -1 / A[i * astep + i];
+        _Tp* rowI = A + i * astep;
+
+        for( j = i + 1; j < m; j++ )
+        {
+            _Tp* rowJ = A + j * astep;
+            _Tp alpha = rowJ[i] * pivotInv;
+
+            #pragma omp simd
+            for( k = i + 1; k < m; k++ )
+                rowJ[k] += alpha * rowI[k];
+
+            if( b ) {
+                _Tp* bI = b + i * bstep;
+                _Tp* bJ = b + j * bstep;
+                #pragma omp simd
+                for( k = 0; k < n; k++ )
+                    bJ[k] += alpha * bI[k];
+            }
+        }
+    }
+
+    if( b )
+    {
+        for( i = m - 1; i >= 0; i-- )
+        {
+            _Tp invDiag = 1 / A[i * astep + i];
+            _Tp* rowI = A + i * astep;
+            for( j = 0; j < n; j++ )
+            {
+                _Tp s = b[i * bstep + j];
+                for( k = i + 1; k < m; k++ )
+                    s -= rowI[k] * b[k * bstep + j];
+                b[i * bstep + j] = s * invDiag;
+            }
+        }
+    }
+
+    return p;
+}
 template<typename _Tp> static inline int
 LUImpl(_Tp* A, size_t astep, int m, _Tp* b, size_t bstep, int n, _Tp eps)
 {
+    if( m > 8){
+        return LUImpl_SIMD<_Tp>(A, astep, m, b, bstep, n, eps);
+    }
     int i, j, k, p = 1;
     astep /= sizeof(A[0]);
     bstep /= sizeof(b[0]);

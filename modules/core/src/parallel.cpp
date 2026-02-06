@@ -77,7 +77,6 @@
 #endif
 
 #ifdef _OPENMP
-    #define HAVE_OPENMP
 #endif
 
 #ifdef __APPLE__
@@ -495,6 +494,22 @@ static SchedPtr pplScheduler;
 #endif
 
 } // namespace anon
+int getenvT(std::string key, int default_value)
+{
+    const char *value = std::getenv(key.c_str());
+    if (value)
+    {
+        try
+        {
+            return std::stoi(value);
+        }
+        catch (...)
+        {
+            return default_value;
+        }
+    }
+    return default_value;
+}
 
 /* ================================   parallel_for_  ================================ */
 
