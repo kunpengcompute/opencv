@@ -9,6 +9,7 @@
 
 #include <algorithm> // std::swap_ranges
 #include <numeric> // std::accumulate
+#include <omp.h>
 
 namespace cv {
 
@@ -17,10 +18,14 @@ namespace cv {
 template<typename T> static void
 transpose_( const uchar* src, size_t sstep, uchar* dst, size_t dstep, Size sz )
 {
-    int i=0, j, m = sz.width, n = sz.height;
+    int m = sz.width, n = sz.height;
+    int i_limit = m - 4;
 
     #if CV_ENABLE_UNROLLED
-    for(; i <= m - 4; i += 4 )
+    int i = 0, j;
+    int threads = getenvT("KCV_ROTATE_T", 16);
+    #pragma omp parallel for private(j) num_threads(threads)
+    for(i = 0; i <= i_limit; i += 4 )
     {
         T* d0 = (T*)(dst + dstep*i);
         T* d1 = (T*)(dst + dstep*(i+1));
@@ -47,29 +52,29 @@ transpose_( const uchar* src, size_t sstep, uchar* dst, size_t dstep, Size sz )
         }
     }
     #endif
-    for( ; i < m; i++ )
-    {
-        T* d0 = (T*)(dst + dstep*i);
-        j = 0;
-        #if CV_ENABLE_UNROLLED
-        for(; j <= n - 4; j += 4 )
-        {
-            const T* s0 = (const T*)(src + i*sizeof(T) + sstep*j);
-            const T* s1 = (const T*)(src + i*sizeof(T) + sstep*(j+1));
-            const T* s2 = (const T*)(src + i*sizeof(T) + sstep*(j+2));
-            const T* s3 = (const T*)(src + i*sizeof(T) + sstep*(j+3));
 
-            d0[j] = s0[0]; d0[j+1] = s1[0]; d0[j+2] = s2[0]; d0[j+3] = s3[0];
+    for( int k = (m >= 4 ? (m & -4) : 0); k < m; k++ )
+    {
+        T* d0 = (T*)(dst + dstep*k);
+        int q = 0;
+        #if CV_ENABLE_UNROLLED
+        for(; q <= n - 4; q += 4 )
+        {
+            const T* s0 = (const T*)(src + k*sizeof(T) + sstep*q);
+            const T* s1 = (const T*)(src + k*sizeof(T) + sstep*(q+1));
+            const T* s2 = (const T*)(src + k*sizeof(T) + sstep*(q+2));
+            const T* s3 = (const T*)(src + k*sizeof(T) + sstep*(q+3));
+
+            d0[q] = s0[0]; d0[q+1] = s1[0]; d0[q+2] = s2[0]; d0[q+3] = s3[0];
         }
         #endif
-        for( ; j < n; j++ )
+        for( ; q < n; q++ )
         {
-            const T* s0 = (const T*)(src + i*sizeof(T) + j*sstep);
-            d0[j] = s0[0];
+            const T* s0 = (const T*)(src + k*sizeof(T) + q*sstep);
+            d0[q] = s0[0];
         }
     }
 }
-
 template<typename T> static void
 transposeI_( uchar* data, size_t step, int n )
 {
@@ -444,74 +449,60 @@ template<typename T1, typename T2> CV_ALWAYS_INLINE void flipHoriz_double( const
 static void
 flipHoriz( const uchar* src, size_t sstep, uchar* dst, size_t dstep, Size size, size_t esz )
 {
+    bool use_parallel = (size.height * size.width * esz >= (1 << 16)) && (size.height > 8);
+    int threads = getenvT("KCV_ROTATE_T", 16);
+
+    const uchar* src_base = src;
+    uchar* dst_base = dst;
+
 #if CV_SIMD128
 #if CV_STRONG_ALIGNMENT
     size_t alignmentMark = ((size_t)src)|((size_t)dst)|sstep|dstep;
 #endif
-    if (esz == 2 * (size_t)VTraits<v_uint8x16>::vlanes())
-    {
-        int end = (int)(size.width*esz);
-        int width = end/2;
 
-        for( ; size.height--; src += sstep, dst += dstep )
-        {
-            for( int i = 0, j = end - 2 * VTraits<v_uint8x16>::vlanes(); i < width; i += 2 * VTraits<v_uint8x16>::vlanes(), j -= 2 * VTraits<v_uint8x16>::vlanes() )
-            {
-#if CV_SIMD256
-                v_uint8x32 t0, t1;
-
-                t0 = v256_load((uchar*)src + i);
-                t1 = v256_load((uchar*)src + j);
-                v_store(dst + j, t0);
-                v_store(dst + i, t1);
-#else
-                v_uint8x16 t0, t1, t2, t3;
-
-                t0 = v_load((uchar*)src + i);
-                t1 = v_load((uchar*)src + i + VTraits<v_uint8x16>::vlanes());
-                t2 = v_load((uchar*)src + j);
-                t3 = v_load((uchar*)src + j + VTraits<v_uint8x16>::vlanes());
-                v_store(dst + j, t0);
-                v_store(dst + j + VTraits<v_uint8x16>::vlanes(), t1);
-                v_store(dst + i, t2);
-                v_store(dst + i + VTraits<v_uint8x16>::vlanes(), t3);
-#endif
-            }
-        }
-    }
-    else if (esz == (size_t)VTraits<v_uint8x16>::vlanes())
-    {
-        int end = (int)(size.width*esz);
-        int width = end/2;
-
-        for( ; size.height--; src += sstep, dst += dstep )
-        {
-            for( int i = 0, j = end - VTraits<v_uint8x16>::vlanes(); i < width; i += VTraits<v_uint8x16>::vlanes(), j -= VTraits<v_uint8x16>::vlanes() )
-            {
-                v_uint8x16 t0, t1;
-
-                t0 = v_load((uchar*)src + i);
-                t1 = v_load((uchar*)src + j);
-                v_store(dst + j, t0);
-                v_store(dst + i, t1);
-            }
-        }
-    }
-    else if (esz == 8
-#if CV_STRONG_ALIGNMENT
-            && isAligned<sizeof(uint64)>(alignmentMark)
-#endif
-    )
-    {
-        flipHoriz_single<v_uint64x2>(src, sstep, dst, dstep, size, esz);
-    }
-    else if (esz == 4
+    if (esz == 4
 #if CV_STRONG_ALIGNMENT
             && isAligned<sizeof(unsigned)>(alignmentMark)
 #endif
     )
     {
-        flipHoriz_single<v_uint32x4>(src, sstep, dst, dstep, size, esz);
+        if (use_parallel)
+        {
+            int end = (int)(size.width * 4);
+            int width = (end + 1) / 2;
+            int width_1 = width & -VTraits<v_uint32x4>::vlanes() * 4; // *4 因为是字节偏移
+
+            #pragma omp parallel for num_threads(threads)
+            for (int y = 0; y < size.height; y++)
+            {
+                const uchar* r_src = src_base + y * sstep;
+                uchar* r_dst = dst_base + y * dstep;
+                int i, j;
+
+                for (i = 0, j = end; i < width_1; i += VTraits<v_uint32x4>::vlanes() * 4, j -= VTraits<v_uint32x4>::vlanes() * 4)
+                {
+                    v_uint32x4 t0, t1;
+                    t0 = v_load((unsigned*)(r_src + i));
+                    t1 = v_load((unsigned*)(r_src + j - VTraits<v_uint32x4>::vlanes() * 4));
+                    t0 = v_reverse(t0);
+                    t1 = v_reverse(t1);
+                    v_store((unsigned*)(r_dst + j - VTraits<v_uint32x4>::vlanes() * 4), t0);
+                    v_store((unsigned*)(r_dst + i), t1);
+                }
+
+                for (; i < width; i += 4, j -= 4)
+                {
+                    unsigned t0 = *((unsigned*)(r_src + i));
+                    unsigned t1 = *((unsigned*)(r_src + j - 4));
+                    *((unsigned*)(r_dst + j - 4)) = t0;
+                    *((unsigned*)(r_dst + i)) = t1;
+                }
+            }
+        }
+        else
+        {
+            flipHoriz_single<v_uint32x4>(src, sstep, dst, dstep, size, esz);
+        }
     }
     else if (esz == 2
 #if CV_STRONG_ALIGNMENT
@@ -523,7 +514,43 @@ flipHoriz( const uchar* src, size_t sstep, uchar* dst, size_t dstep, Size size, 
     }
     else if (esz == 1)
     {
-        flipHoriz_single<v_uint8x16>(src, sstep, dst, dstep, size, esz);
+        if (use_parallel)
+        {
+            int end = (int)(size.width);
+            int width = (end + 1) / 2;
+            int width_1 = width & -VTraits<v_uint8x16>::vlanes();
+
+            #pragma omp parallel for num_threads(threads)
+            for (int y = 0; y < size.height; y++)
+            {
+                const uchar* r_src = src_base + y * sstep;
+                uchar* r_dst = dst_base + y * dstep;
+                int i, j;
+
+                for (i = 0, j = end; i < width_1; i += VTraits<v_uint8x16>::vlanes(), j -= VTraits<v_uint8x16>::vlanes())
+                {
+                    v_uint8x16 t0, t1;
+                    t0 = v_load((uchar*)r_src + i);
+                    t1 = v_load((uchar*)r_src + j - VTraits<v_uint8x16>::vlanes());
+                    t0 = v_reverse(t0);
+                    t1 = v_reverse(t1);
+                    v_store(r_dst + j - VTraits<v_uint8x16>::vlanes(), t0);
+                    v_store(r_dst + i, t1);
+                }
+                // 尾部 scalar 处理
+                for (; i < width; i++, j--)
+                {
+                    uchar t0 = r_src[i];
+                    uchar t1 = r_src[j - 1];
+                    r_dst[j - 1] = t0;
+                    r_dst[i] = t1;
+                }
+            }
+        }
+        else
+        {
+            flipHoriz_single<v_uint8x16>(src, sstep, dst, dstep, size, esz);
+        }
     }
     else if (esz == 24
 #if CV_STRONG_ALIGNMENT
@@ -533,14 +560,11 @@ flipHoriz( const uchar* src, size_t sstep, uchar* dst, size_t dstep, Size size, 
     {
         int end = (int)(size.width*esz);
         int width = (end + 1)/2;
-
-        for( ; size.height--; src += sstep, dst += dstep )
-        {
-            for ( int i = 0, j = end; i < width; i += VTraits<v_uint8x16>::vlanes() + sizeof(uint64_t), j -= VTraits<v_uint8x16>::vlanes() + sizeof(uint64_t) )
+        for( ; size.height--; src += sstep, dst += dstep ) {
+             for ( int i = 0, j = end; i < width; i += VTraits<v_uint8x16>::vlanes() + sizeof(uint64_t), j -= VTraits<v_uint8x16>::vlanes() + sizeof(uint64_t) )
             {
                 v_uint8x16 t0, t1;
                 uint64_t t2, t3;
-
                 t0 = v_load((uchar*)src + i);
                 t2 = *((uint64_t*)((uchar*)src + i + VTraits<v_uint8x16>::vlanes()));
                 t1 = v_load((uchar*)src + j - VTraits<v_uint8x16>::vlanes() - sizeof(uint64_t));
@@ -553,52 +577,103 @@ flipHoriz( const uchar* src, size_t sstep, uchar* dst, size_t dstep, Size size, 
         }
     }
 #if !CV_STRONG_ALIGNMENT
-    else if (esz == 12)
-    {
-        flipHoriz_double<uint64_t,uint>(src, sstep, dst, dstep, size, esz);
-    }
-    else if (esz == 6)
-    {
-        flipHoriz_double<uint,ushort>(src, sstep, dst, dstep, size, esz);
-    }
     else if (esz == 3)
     {
-        flipHoriz_double<ushort,uchar>(src, sstep, dst, dstep, size, esz);
+        if (use_parallel)
+        {
+            int end = (int)(size.width * 3);
+            int width = (end + 1) / 2;
+
+            #pragma omp parallel for num_threads(threads)
+            for (int y = 0; y < size.height; y++)
+            {
+                const uchar* r_src = src_base + y * sstep;
+                uchar* r_dst = dst_base + y * dstep;
+
+                for (int i = 0, j = end; i < width; i += 3, j -= 3)
+                {
+                    ushort t0, t1;
+                    uchar t2, t3;
+
+                    t0 = *((ushort*)(r_src + i));
+                    t2 = *((uchar*)(r_src + i + 2));
+                    
+                    t1 = *((ushort*)(r_src + j - 3));
+                    t3 = *((uchar*)(r_src + j - 1));
+
+                    *((ushort*)(r_dst + j - 3)) = t0;
+                    *((uchar*)(r_dst + j - 1)) = t2;
+                    
+                    *((ushort*)(r_dst + i)) = t1;
+                    *((uchar*)(r_dst + i + 2)) = t3;
+                }
+            }
+        }
+        else
+        {
+            flipHoriz_double<ushort,uchar>(src, sstep, dst, dstep, size, esz);
+        }
     }
+    else if (esz == 12) { flipHoriz_double<uint64_t,uint>(src, sstep, dst, dstep, size, esz); }
+    else if (esz == 6)  { flipHoriz_double<uint,ushort>(src, sstep, dst, dstep, size, esz); }
 #endif
+    else if (esz == 8) { flipHoriz_single<v_uint64x2>(src, sstep, dst, dstep, size, esz); }
+
     else
 #endif // CV_SIMD128
     {
-        int i, j, limit = (int)(((size.width + 1)/2)*esz);
+        int limit = (int)(((size.width + 1)/2)*esz);
         AutoBuffer<int> _tab(size.width*esz);
         int* tab = _tab.data();
 
-        for( i = 0; i < size.width; i++ )
+        for( int i = 0; i < size.width; i++ )
             for( size_t k = 0; k < esz; k++ )
                 tab[i*esz + k] = (int)((size.width - i - 1)*esz + k);
 
-        for( ; size.height--; src += sstep, dst += dstep )
-        {
-            for( i = 0; i < limit; i++ )
+        if (use_parallel) {
+            #pragma omp parallel for num_threads(threads)
+            for( int y = 0; y < size.height; y++ )
             {
-                j = tab[i];
-                uchar t0 = src[i], t1 = src[j];
-                dst[i] = t1; dst[j] = t0;
+                const uchar* r_src = src_base + y * sstep;
+                uchar* r_dst = dst_base + y * dstep;
+                for( int i = 0; i < limit; i++ )
+                {
+                    int j = tab[i];
+                    uchar t0 = r_src[i], t1 = r_src[j];
+                    r_dst[i] = t1; r_dst[j] = t0;
+                }
+            }
+        } else {
+             for( ; size.height--; src += sstep, dst += dstep )
+            {
+                for( int i = 0; i < limit; i++ )
+                {
+                    int j = tab[i];
+                    uchar t0 = src[i], t1 = src[j];
+                    dst[i] = t1; dst[j] = t0;
+                }
             }
         }
     }
 }
 
 static void
-flipVert( const uchar* src0, size_t sstep, uchar* dst0, size_t dstep, Size size, size_t esz )
+flipVert( const uchar* src0_base, size_t sstep, uchar* dst0_base, size_t dstep, Size size, size_t esz )
 {
-    const uchar* src1 = src0 + (size.height - 1)*sstep;
-    uchar* dst1 = dst0 + (size.height - 1)*dstep;
     size.width *= (int)esz;
 
-    for( int y = 0; y < (size.height + 1)/2; y++, src0 += sstep, src1 -= sstep,
-                                                  dst0 += dstep, dst1 -= dstep )
+    int half_height = (size.height + 1) / 2;
+
+    int threads = getenvT("KCV_ROTATE_T", 16);
+    #pragma omp parallel for num_threads(threads)
+    for( int y = 0; y < half_height; y++ )
     {
+        const uchar* src0 = src0_base + y * sstep;
+        const uchar* src1 = src0_base + (size.height - 1 - y) * sstep;
+        
+        uchar* dst0 = dst0_base + y * dstep;
+        uchar* dst1 = dst0_base + (size.height - 1 - y) * dstep;
+
         int i = 0;
 #if (CV_SIMD || CV_SIMD_SCALABLE)
 #if CV_STRONG_ALIGNMENT

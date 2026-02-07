@@ -206,77 +206,190 @@ minMaxIdx_finish( const T* src, const uchar* mask, WT* minval, WT* maxval,
 }
 #endif
 
-static void minMaxIdx_8u(const uchar* src, const uchar* mask, int* minval, int* maxval,
-                         size_t* minidx, size_t* maxidx, int len, size_t startidx )
+static inline int neonFirstTrue_u8(uint8x16_t v)
 {
-#if CV_SIMD128
-    if ( len >= VTraits<v_uint8x16>::vlanes() )
+    uint8x16_t nz = vmvnq_u8(vceqq_u8(v, vdupq_n_u8(0)));
+    uint64x2_t pair = vreinterpretq_u64_u8(nz);
+
+    if (vgetq_lane_u64(pair, 0))
+        return __builtin_ctzll(vgetq_lane_u64(pair, 0)) >> 3;
+    if (vgetq_lane_u64(pair, 1))
+        return (__builtin_ctzll(vgetq_lane_u64(pair, 1)) >> 3) + 8;
+
+    return -1;
+}
+
+static void minMaxIdx_8u_nomask_neon(const uchar* src,
+                                    int* minval, int* maxval,
+                                    size_t* minidx, size_t* maxidx,
+                                    int len, size_t startidx)
+{
+    int minVal = *minval;
+    int maxVal = *maxval;
+    size_t minIdx = *minidx;
+    size_t maxIdx = *maxidx;
+
+    uint8x16_t vmin_all = vdupq_n_u8((uint8_t)minVal);
+    uint8x16_t vmax_all = vdupq_n_u8((uint8_t)maxVal);
+
+    uint8_t tmp[16];
+    int i = 0;
+    for (; i <= len - 16; i += 16)
     {
-        int j, len0;
-        int minVal, maxVal;
-        size_t minIdx, maxIdx;
+        uint8x16_t v = vld1q_u8(src + i);
 
-        minMaxIdx_init( src, mask, minval, maxval, minidx, maxidx, minVal, maxVal, minIdx, maxIdx,
-                        (int)0, (int)UCHAR_MAX, VTraits<v_uint8x16>::vlanes(), len, startidx, j, len0 );
+        // minvalue
+        uint8x16_t blockMinVec = vminq_u8(v, vmin_all);
+        uint8_t blockMin = vminvq_u8(blockMinVec);
 
-        if ( j <= len0 - VTraits<v_uint8x16>::vlanes() )
+        if (blockMin < minVal)
         {
-            v_uint8x16 inc = v_setall_u8((uchar)VTraits<v_uint8x16>::vlanes());
-            v_uint8x16 none = v_reinterpret_as_u8(v_setall_s8(-1));
-            v_uint8x16 idxStart(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+            uint8x16_t eq = vceqq_u8(v, vdupq_n_u8(blockMin));
+            int lane = neonFirstTrue_u8(eq);
+            vst1q_u8(tmp, v);
 
-            do
-            {
-                v_uint8x16 valMin = v_setall_u8((uchar)minVal), valMax = v_setall_u8((uchar)maxVal);
-                v_uint8x16 idx = idxStart, idxMin = none, idxMax = none;
-
-                int k = j;
-                size_t delta = startidx + j;
-
-                if ( !mask )
-                {
-                    for( ; k < std::min(len0, j + 15 * VTraits<v_uint8x16>::vlanes()); k += VTraits<v_uint8x16>::vlanes() )
-                    {
-                        v_uint8x16 data = v_load(src + k);
-                        v_uint8x16 cmpMin = (v_lt(data, valMin));
-                        v_uint8x16 cmpMax = (v_gt(data, valMax));
-                        idxMin = v_select(cmpMin, idx, idxMin);
-                        idxMax = v_select(cmpMax, idx, idxMax);
-                        valMin = v_min(data, valMin);
-                        valMax = v_max(data, valMax);
-                        idx = v_add(idx, inc);
-                    }
-                }
-                else
-                {
-                    for( ; k < std::min(len0, j + 15 * VTraits<v_uint8x16>::vlanes()); k += VTraits<v_uint8x16>::vlanes() )
-                    {
-                        v_uint8x16 data = v_load(src + k);
-                        v_uint8x16 maskVal = v_ne(v_load(mask + k), v_setzero_u8());
-                        v_uint8x16 cmpMin = v_and(v_lt(data, valMin), maskVal);
-                        v_uint8x16 cmpMax = v_and(v_gt(data, valMax), maskVal);
-                        idxMin = v_select(cmpMin, idx, idxMin);
-                        idxMax = v_select(cmpMax, idx, idxMax);
-                        valMin = v_select(cmpMin, data, valMin);
-                        valMax = v_select(cmpMax, data, valMax);
-                        idx = v_add(idx, inc);
-                    }
-                }
-
-                j = k;
-
-                minMaxIdx_reduce_u8( valMin, valMax, idxMin, idxMax, none, minVal, maxVal,
-                                     minIdx, maxIdx, delta );
-            }
-            while ( j < len0 );
+            minVal = blockMin;
+            minIdx = startidx + i + lane;
+            vmin_all = vdupq_n_u8((uint8_t)minVal);
         }
 
-        minMaxIdx_finish( src, mask, minval, maxval, minidx, maxidx, minVal, maxVal,
-                          minIdx, maxIdx, len, startidx, j );
+        // maxvalue
+        uint8x16_t blockMaxVec = vmaxq_u8(v, vmax_all);
+        uint8_t blockMax = vmaxvq_u8(blockMaxVec);
+
+        if (blockMax > maxVal)
+        {
+            uint8x16_t eq = vceqq_u8(v, vdupq_n_u8(blockMax));
+            int lane = neonFirstTrue_u8(eq);
+            vst1q_u8(tmp, v);
+
+            maxVal = blockMax;
+            maxIdx = startidx + i + lane;
+            vmax_all = vdupq_n_u8((uint8_t)maxVal);
+        }
     }
-    else
+
+    for (; i < len; i++)
     {
-        minMaxIdx_(src, mask, minval, maxval, minidx, maxidx, len, startidx);
+        uchar v = src[i];
+        if (v < minVal)
+        {
+            minVal = v;
+            minIdx = startidx + i;
+        }
+        if (v > maxVal)
+        {
+            maxVal = v;
+            maxIdx = startidx + i;
+        }
+    }
+
+    *minval = minVal;
+    *maxval = maxVal;
+    *minidx = minIdx;
+    *maxidx = maxIdx;
+    return;
+}
+
+static void minMaxIdx_8u_mask_neon(const uchar* src, const uchar* mask,
+                                  int* minval, int* maxval,
+                                  size_t* minidx, size_t* maxidx,
+                                  int len, size_t startidx)
+{
+    int minVal = *minval;
+    int maxVal = *maxval;
+    size_t minIdx = *minidx;
+    size_t maxIdx = *maxidx;
+
+    uint8x16_t vmin_all = vdupq_n_u8((uint8_t)minVal);
+    uint8x16_t vmax_all = vdupq_n_u8((uint8_t)maxVal);
+
+    const uint8x16_t v255  = vdupq_n_u8(255);
+    const uint8x16_t vzero = vdupq_n_u8(0);
+
+    int i = 0;
+    for (; i <= len - 16; i += 16)
+    {
+        uint8x16_t v = vld1q_u8(src + i);
+        uint8x16_t m = vld1q_u8(mask + i);
+
+        uint8x16_t valid = vcgtq_u8(m, vzero);
+
+        // masked value: invalid -> 255
+        uint8x16_t v_min_masked = vbslq_u8(valid, v, v255);
+        // block min compared with current min
+        uint8x16_t blockMinVec = vminq_u8(v_min_masked, vmin_all);
+        uint8_t blockMin = vminvq_u8(blockMinVec);
+
+        if (blockMin < minVal)
+        {
+            uint8x16_t eq = vandq_u8(valid, vceqq_u8(v, vdupq_n_u8(blockMin)));
+            int lane = neonFirstTrue_u8(eq);
+
+            if (lane >= 0)
+            {
+                minVal = blockMin;
+                minIdx = startidx + i + lane;
+                vmin_all = vdupq_n_u8((uint8_t)minVal);
+            }
+        }
+
+        // masked value: invalid -> 0
+        uint8x16_t v_max_masked = vbslq_u8(valid, v, vzero);
+
+        uint8x16_t blockMaxVec = vmaxq_u8(v_max_masked, vmax_all);
+        uint8_t blockMax = vmaxvq_u8(blockMaxVec);
+
+        if (blockMax > maxVal)
+        {
+            uint8x16_t eq = vandq_u8(valid, vceqq_u8(v, vdupq_n_u8(blockMax)));
+            int lane = neonFirstTrue_u8(eq);
+
+            if (lane >= 0)
+            {
+                maxVal = blockMax;
+                maxIdx = startidx + i + lane;
+                vmax_all = vdupq_n_u8((uint8_t)maxVal);
+            }
+        }
+    }
+
+    for (; i < len; i++)
+    {
+        if (!mask[i])
+            continue;
+
+        uchar v = src[i];
+        if (v < minVal)
+        {
+            minVal = v;
+            minIdx = startidx + i;
+        }
+        if (v > maxVal)
+        {
+            maxVal = v;
+            maxIdx = startidx + i;
+        }
+    }
+
+    *minval = minVal;
+    *maxval = maxVal;
+    *minidx = minIdx;
+    *maxidx = maxIdx;
+    return;
+}
+
+static void minMaxIdx_8u(const uchar* src, const uchar* mask,
+                         int* minval, int* maxval,
+                         size_t* minidx, size_t* maxidx,
+                         int len, size_t startidx)
+{
+#if defined(__ARM_NEON)
+    if (!mask) {
+        minMaxIdx_8u_nomask_neon(src, minval, maxval, minidx, maxidx, len, startidx);
+    }
+    else {
+        minMaxIdx_8u_mask_neon(src, mask, minval, maxval, minidx, maxidx, len, startidx);
     }
 #else
     minMaxIdx_(src, mask, minval, maxval, minidx, maxidx, len, startidx);
