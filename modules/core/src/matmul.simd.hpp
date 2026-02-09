@@ -1578,7 +1578,7 @@ transform_8u( const uchar* src, uchar* dst, const float* m, int len, int scn, in
     }
 #endif
 
-if (CV_SIMD || CV_SIMD_SCALABLE)
+#if (CV_SIMD || CV_SIMD_SCALABLE)
     const int BITS = 10, SCALE = 1 << BITS;
     const float MAX_M = (float)(1 << (15 - BITS));
 
