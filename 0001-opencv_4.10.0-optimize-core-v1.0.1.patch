@@ -1,0 +1,2375 @@
+diff -Naur opencv-4.10.0/modules/core/include/opencv2/core/utility.hpp opencv/modules/core/include/opencv2/core/utility.hpp
+--- opencv-4.10.0/modules/core/include/opencv2/core/utility.hpp	2024-06-02 19:41:07.000000000 +0800
++++ opencv/modules/core/include/opencv2/core/utility.hpp	2026-02-09 14:42:38.823194197 +0800
+@@ -584,6 +584,7 @@
+ 
+ @ingroup core_parallel
+ */
++CV_EXPORTS int getenvT(std::string key, int default_value);
+ CV_EXPORTS void parallel_for_(const Range& range, const ParallelLoopBody& body, double nstripes=-1.);
+ 
+ //! @ingroup core_parallel
+diff -Naur opencv-4.10.0/modules/core/src/lapack.cpp opencv/modules/core/src/lapack.cpp
+--- opencv-4.10.0/modules/core/src/lapack.cpp	2024-06-02 19:41:07.000000000 +0800
++++ opencv/modules/core/src/lapack.cpp	2026-02-09 14:42:38.839195305 +0800
+@@ -123,126 +123,258 @@
+         vstep /= sizeof(V[0]);
+         for( i = 0; i < n; i++ )
+         {
++            _Tp* Vi = V + i * vstep;
+             for( j = 0; j < n; j++ )
+-                V[i*vstep + j] = (_Tp)0;
+-            V[i*vstep + i] = (_Tp)1;
++                Vi[j] = (_Tp)0;
++            Vi[i] = (_Tp)1;
+         }
+     }
+ 
+-    int iters, maxIters = n*n*30;
++    const int maxIters = n * n * 30;
+ 
+     int* indR = (int*)alignPtr(buf, sizeof(int));
+     int* indC = indR + n;
+-    _Tp mv = (_Tp)0;
++    _Tp mv;
+ 
+     for( k = 0; k < n; k++ )
+     {
+-        W[k] = A[(astep + 1)*k];
++        W[k] = A[(astep + 1) * k];
+         if( k < n - 1 )
+         {
+-            for( m = k+1, mv = std::abs(A[astep*k + m]), i = k+2; i < n; i++ )
++            const _Tp* Ak = A + astep * k;
++            m = k + 1;
++            mv = std::abs(Ak[m]);
++            for( i = k + 2; i < n; i++ )
+             {
+-                _Tp val = std::abs(A[astep*k+i]);
++                _Tp val = std::abs(Ak[i]);
+                 if( mv < val )
+-                    mv = val, m = i;
++                {
++                    mv = val;
++                    m = i;
++                }
+             }
+             indR[k] = m;
+         }
+         if( k > 0 )
+         {
+-            for( m = 0, mv = std::abs(A[k]), i = 1; i < k; i++ )
++            m = 0;
++            mv = std::abs(A[k]);
++            for( i = 1; i < k; i++ )
+             {
+-                _Tp val = std::abs(A[astep*i+k]);
++                _Tp val = std::abs(A[astep * i + k]);
+                 if( mv < val )
+-                    mv = val, m = i;
++                {
++                    mv = val;
++                    m = i;
++                }
+             }
+             indC[k] = m;
+         }
+     }
+ 
+-    if( n > 1 ) for( iters = 0; iters < maxIters; iters++ )
++    if( n <= 1 )
++        return true;
++
++    for( int iters = 0; iters < maxIters; iters++ )
+     {
+-        // find index (k,l) of pivot p
+-        for( k = 0, mv = std::abs(A[indR[0]]), i = 1; i < n-1; i++ )
++        k = 0;
++        mv = std::abs(A[indR[0]]);
++        for( i = 1; i < n - 1; i++ )
+         {
+-            _Tp val = std::abs(A[astep*i + indR[i]]);
++            _Tp val = std::abs(A[astep * i + indR[i]]);
+             if( mv < val )
+-                mv = val, k = i;
++            {
++                mv = val;
++                k = i;
++            }
+         }
+         int l = indR[k];
+         for( i = 1; i < n; i++ )
+         {
+-            _Tp val = std::abs(A[astep*indC[i] + i]);
++            _Tp val = std::abs(A[astep * indC[i] + i]);
+             if( mv < val )
+-                mv = val, k = indC[i], l = i;
++            {
++                mv = val;
++                k = indC[i];
++                l = i;
++            }
+         }
++        _Tp* Ak = A + astep * k;
++        _Tp* Al = A + astep * l;
+ 
+-        _Tp p = A[astep*k + l];
++        _Tp p = Ak[l];
+         if( std::abs(p) <= eps )
+             break;
+-        _Tp y = (_Tp)((W[l] - W[k])*0.5);
++        _Tp y = (_Tp)((W[l] - W[k]) * 0.5);
+         _Tp t = std::abs(y) + hypot(p, y);
+-        _Tp s = hypot(p, t);
+-        _Tp c = t/s;
+-        s = p/s; t = (p/t)*p;
+-        if( y < 0 )
+-            s = -s, t = -t;
+-        A[astep*k + l] = 0;
++        _Tp s_val = hypot(p, t);
++        _Tp c = t / s_val;
++        _Tp s = p / s_val;
++        t = (p / t) * p;
+ 
++        if( y < 0 )
++        {
++            s = -s;
++            t = -t;
++        }
++        Ak[l] = 0;
+         W[k] -= t;
+         W[l] += t;
+ 
+         _Tp a0, b0;
+ 
+-#undef rotate
+-#define rotate(v0, v1) a0 = v0, b0 = v1, v0 = a0*c - b0*s, v1 = a0*s + b0*c
+-
+-        // rotate rows and columns k and l
+         for( i = 0; i < k; i++ )
+-            rotate(A[astep*i+k], A[astep*i+l]);
+-        for( i = k+1; i < l; i++ )
+-            rotate(A[astep*k+i], A[astep*i+l]);
+-        for( i = l+1; i < n; i++ )
+-            rotate(A[astep*k+i], A[astep*l+i]);
++        {
++            _Tp* Ai = A + astep * i;
++            a0 = Ai[k];
++            b0 = Ai[l];
++            Ai[k] = a0 * c - b0 * s;
++            Ai[l] = a0 * s + b0 * c;
++        }
++
++        for( i = k + 1; i < l; i++ )
++        {
++            a0 = Ak[i];
++            b0 = A[astep * i + l];
++            Ak[i] = a0 * c - b0 * s;
++            A[astep * i + l] = a0 * s + b0 * c;
++        }
++
++        int i_end = l + 1 + ((n - l - 1) & ~3);
++        for( i = l + 1; i < i_end; i += 4 )
++        {
++            a0 = Ak[i];
++            b0 = Al[i];
++            Ak[i] = a0 * c - b0 * s;
++            Al[i] = a0 * s + b0 * c;
++
++            a0 = Ak[i + 1];
++            b0 = Al[i + 1];
++            Ak[i + 1] = a0 * c - b0 * s;
++            Al[i + 1] = a0 * s + b0 * c;
++
++            a0 = Ak[i + 2];
++            b0 = Al[i + 2];
++            Ak[i + 2] = a0 * c - b0 * s;
++            Al[i + 2] = a0 * s + b0 * c;
++
++            a0 = Ak[i + 3];
++            b0 = Al[i + 3];
++            Ak[i + 3] = a0 * c - b0 * s;
++            Al[i + 3] = a0 * s + b0 * c;
++        }
++        for( ; i < n; i++ )
++        {
++            a0 = Ak[i];
++            b0 = Al[i];
++            Ak[i] = a0 * c - b0 * s;
++            Al[i] = a0 * s + b0 * c;
++        }
+ 
+-        // rotate eigenvectors
+         if( V )
+-            for( i = 0; i < n; i++ )
+-                rotate(V[vstep*k+i], V[vstep*l+i]);
++        {
++            _Tp* Vk = V + vstep * k;
++            _Tp* Vl = V + vstep * l;
++
++            int n4 = n & ~3;
++            for( i = 0; i < n4; i += 4 )
++            {
++                a0 = Vk[i];
++                b0 = Vl[i];
++                Vk[i] = a0 * c - b0 * s;
++                Vl[i] = a0 * s + b0 * c;
++
++                a0 = Vk[i + 1];
++                b0 = Vl[i + 1];
++                Vk[i + 1] = a0 * c - b0 * s;
++                Vl[i + 1] = a0 * s + b0 * c;
++
++                a0 = Vk[i + 2];
++                b0 = Vl[i + 2];
++                Vk[i + 2] = a0 * c - b0 * s;
++                Vl[i + 2] = a0 * s + b0 * c;
++
++                a0 = Vk[i + 3];
++                b0 = Vl[i + 3];
++                Vk[i + 3] = a0 * c - b0 * s;
++                Vl[i + 3] = a0 * s + b0 * c;
++            }
++            for( ; i < n; i++ )
++            {
++                a0 = Vk[i];
++                b0 = Vl[i];
++                Vk[i] = a0 * c - b0 * s;
++                Vl[i] = a0 * s + b0 * c;
++            }
++        }
+ 
+-#undef rotate
++        if( k < n - 1 )
++        {
++            m = k + 1;
++            mv = std::abs(Ak[m]);
++            for( i = k + 2; i < n; i++ )
++            {
++                _Tp val = std::abs(Ak[i]);
++                if( mv < val )
++                {
++                    mv = val;
++                    m = i;
++                }
++            }
++            indR[k] = m;
++        }
++        if( k > 0 )
++        {
++            m = 0;
++            mv = std::abs(A[k]);
++            for( i = 1; i < k; i++ )
++            {
++                _Tp val = std::abs(A[astep * i + k]);
++                if( mv < val )
++                {
++                    mv = val;
++                    m = i;
++                }
++            }
++            indC[k] = m;
++        }
+ 
+-        for( j = 0; j < 2; j++ )
++        if( l < n - 1 )
+         {
+-            int idx = j == 0 ? k : l;
+-            if( idx < n - 1 )
++            m = l + 1;
++            mv = std::abs(Al[m]);
++            for( i = l + 2; i < n; i++ )
+             {
+-                for( m = idx+1, mv = std::abs(A[astep*idx + m]), i = idx+2; i < n; i++ )
++                _Tp val = std::abs(Al[i]);
++                if( mv < val )
+                 {
+-                    _Tp val = std::abs(A[astep*idx+i]);
+-                    if( mv < val )
+-                        mv = val, m = i;
++                    mv = val;
++                    m = i;
+                 }
+-                indR[idx] = m;
+             }
+-            if( idx > 0 )
++            indR[l] = m;
++        }
++        if( l > 0 )
++        {
++            m = 0;
++            mv = std::abs(A[l]);
++            for( i = 1; i < l; i++ )
+             {
+-                for( m = 0, mv = std::abs(A[idx]), i = 1; i < idx; i++ )
++                _Tp val = std::abs(A[astep * i + l]);
++                if( mv < val )
+                 {
+-                    _Tp val = std::abs(A[astep*i+idx]);
+-                    if( mv < val )
+-                        mv = val, m = i;
++                    mv = val;
++                    m = i;
+                 }
+-                indC[idx] = m;
+             }
++            indC[l] = m;
+         }
+     }
+ 
+-    // sort eigenvalues & eigenvectors
+-    for( k = 0; k < n-1; k++ )
++    for( k = 0; k < n - 1; k++ )
+     {
+         m = k;
+-        for( i = k+1; i < n; i++ )
++        for( i = k + 1; i < n; i++ )
+         {
+             if( W[m] < W[i] )
+                 m = i;
+@@ -251,8 +383,21 @@
+         {
+             std::swap(W[m], W[k]);
+             if( V )
+-                for( i = 0; i < n; i++ )
+-                    std::swap(V[vstep*m + i], V[vstep*k + i]);
++            {
++                _Tp* Vm = V + vstep * m;
++                _Tp* Vk_ptr = V + vstep * k;
++
++                int n4 = n & ~3;
++                for( i = 0; i < n4; i += 4 )
++                {
++                    std::swap(Vm[i], Vk_ptr[i]);
++                    std::swap(Vm[i + 1], Vk_ptr[i + 1]);
++                    std::swap(Vm[i + 2], Vk_ptr[i + 2]);
++                    std::swap(Vm[i + 3], Vk_ptr[i + 3]);
++                }
++                for( ; i < n; i++ )
++                    std::swap(Vm[i], Vk_ptr[i]);
++            }
+         }
+     }
+ 
+diff -Naur opencv-4.10.0/modules/core/src/matmul.dispatch.cpp opencv/modules/core/src/matmul.dispatch.cpp
+--- opencv-4.10.0/modules/core/src/matmul.dispatch.cpp	2024-06-02 19:41:07.000000000 +0800
++++ opencv/modules/core/src/matmul.dispatch.cpp	2026-02-09 14:42:38.839195305 +0800
+@@ -434,6 +434,7 @@
+ /****************************************************************************************\
+ *                                        Transform                                       *
+ \****************************************************************************************/
++#define CV_OPT_TOTAL_SIZE_THRESHOLD 10000
+ 
+ static TransformFunc getTransformFunc(int depth)
+ {
+@@ -522,10 +523,26 @@
+     const Mat* arrays[] = {&src, &dst, 0};
+     uchar* ptrs[2] = {};
+     NAryMatIterator it(arrays, ptrs);
+-    size_t i, total = it.size;
+ 
+-    for( i = 0; i < it.nplanes; i++, ++it )
+-        func( ptrs[0], ptrs[1], (uchar*)mbuf, (int)total, scn, dcn );
++    int nplanes = it.nplanes;
++    int planesize = it.size;
++    long total_pixels = (long)nplanes * planesize;
++    if (nplanes > 1 && total_pixels >= CV_OPT_TOTAL_SIZE_THRESHOLD) {
++        std::vector<uchar*> src_ptrs(nplanes);
++        std::vector<uchar*> dst_ptrs(nplanes);
++        for (int i = 0; i < nplanes; i++, ++it) {
++            src_ptrs[i] = it.ptrs[0];
++            dst_ptrs[i] = it.ptrs[1];
++        }
++        #pragma omp parallel for num_threads(4)
++        for (int i = 0; i < nplanes; i++) {
++            func(src_ptrs[i], dst_ptrs[i], (uchar*)mbuf, (int)planesize, scn, dcn);
++        }
++    } else {
++        for (int i = 0; i < nplanes; i++, ++it) {
++            func(ptrs[0], ptrs[1], (uchar*)mbuf, (int)planesize, scn, dcn);
++        }
++    }
+ }
+ 
+ 
+diff -Naur opencv-4.10.0/modules/core/src/matmul.simd.hpp opencv/modules/core/src/matmul.simd.hpp
+--- opencv-4.10.0/modules/core/src/matmul.simd.hpp	2024-06-02 19:41:07.000000000 +0800
++++ opencv/modules/core/src/matmul.simd.hpp	2026-02-09 16:46:01.987807070 +0800
+@@ -41,6 +41,7 @@
+ //
+ //M*/
+ 
++#include <omp.h>
+ #include "precomp.hpp"
+ 
+ #ifdef HAVE_LAPACK
+@@ -1376,6 +1377,7 @@
+ /****************************************************************************************\
+ *                                        Transform                                       *
+ \****************************************************************************************/
++#define CV_OPT_PLANE_SIZE_THRESHOLD 4000
+ 
+ template<typename T, typename WT> static void
+ transform_( const T* src, T* dst, const WT* m, int len, int scn, int dcn )
+@@ -1438,9 +1440,144 @@
+     }
+ }
+ 
++static inline int32x4_t vmlal_low_n_s16(int32x4_t res, int16x8_t v, int16_t c)
++{
++    asm(
++        "smlal %0.4s, %1.4h, %2.h[0]"
++        : "+w"(res)
++        : "w"(v), "w"(c)
++    );
++    return res;
++}
++
++static inline uint16x8_t vmovl_low_u8(uint8x16_t v)
++{
++    uint16x8_t res;
++    asm(
++        "ushll %0.8h, %1.8b, #0"
++        : "=w"(res)
++        : "w"(v)
++    );
++    return res;
++}
++
++static inline uint32x4_t vmovl_low_u16(uint16x8_t v)
++{
++    uint32x4_t res;
++    asm(
++        "ushll %0.4s, %1.4h, #0"
++        : "=w"(res)
++        : "w"(v)
++    );
++    return res;
++
++}
++
+ static void
+ transform_8u( const uchar* src, uchar* dst, const float* m, int len, int scn, int dcn )
+ {
++#if defined(__aarch64__) && (defined(CV_NEON))
++    if (len > CV_OPT_PLANE_SIZE_THRESHOLD) {
++        const int BITS = 10, SCALE = 1 << BITS;
++        const float MAX_M = (float)(1 << (15 - BITS));
++
++        if( scn == 3 && dcn == 3 &&
++            std::abs(m[0]) < MAX_M && std::abs(m[1]) < MAX_M && std::abs(m[2]) < MAX_M*256 && std::abs(m[3]) < MAX_M*256 &&
++            std::abs(m[4]) < MAX_M && std::abs(m[5]) < MAX_M && std::abs(m[6]) < MAX_M*256 && std::abs(m[7]) < MAX_M*256 &&
++            std::abs(m[8]) < MAX_M && std::abs(m[9]) < MAX_M && std::abs(m[10]) < MAX_M*256 && std::abs(m[11]) < MAX_M*256 )
++        {
++            int16_t m0 = saturate_cast<short>(m[0] * SCALE);
++            int16_t m1 = saturate_cast<short>(m[1] * SCALE);
++            int32x4_t vm2 = vdupq_n_s32(saturate_cast<int>(m[2] * SCALE));
++            int32x4_t vm3 = vdupq_n_s32(saturate_cast<int>(m[3] * SCALE));
++
++            int16_t m4 = saturate_cast<short>(m[4] * SCALE);
++            int16_t m5 = saturate_cast<short>(m[5] * SCALE);
++            int32x4_t vm6 = vdupq_n_s32(saturate_cast<int>(m[6] * SCALE));
++            int32x4_t vm7 = vdupq_n_s32(saturate_cast<int>(m[7] * SCALE));
++
++            int16_t m8 = saturate_cast<short>(m[8] * SCALE);
++            int16_t m9 = saturate_cast<short>(m[9] * SCALE);
++            int32x4_t vm10 = vdupq_n_s32(saturate_cast<int>(m[10] * SCALE));
++            int32x4_t vm11 = vdupq_n_s32(saturate_cast<int>(m[11] * SCALE));
++
++            int i = 0;
++            #pragma omp parallel for num_threads(4) schedule(static)
++            for (i = 0; i <= (len - 16); i += 16)
++            {
++                uint8x16x3_t v_src = vld3q_u8(src + i * 3);
++                uint8x16_t vb = v_src.val[0];
++                uint8x16_t vg = v_src.val[1];
++                uint8x16_t vr = v_src.val[2];
++
++                int16x8_t bl = vreinterpretq_s16_u16(vmovl_low_u8(vb));
++
++                int16x8_t bh = vreinterpretq_s16_u16(vmovl_high_u8(vb));
++                int16x8_t gl = vreinterpretq_s16_u16(vmovl_low_u8(vg));
++                int16x8_t gh = vreinterpretq_s16_u16(vmovl_high_u8(vg));
++                uint16x8_t rl = vmovl_low_u8(vr);
++                uint16x8_t rh = vmovl_high_u8(vr);
++                int32x4_t rl_low = vreinterpretq_s32_u32(vmovl_low_u16(rl));
++
++                int32x4_t rl_high = vreinterpretq_s32_u32(vmovl_high_u16(rl));
++                int32x4_t rh_low = vreinterpretq_s32_u32(vmovl_low_u16(rh));
++                int32x4_t rh_high = vreinterpretq_s32_u32(vmovl_high_u16(rh));
++
++
++                auto calc_chn = [&](int16_t c0, int16_t c1, int32x4_t c2, int32x4_t c3_bias) {
++                    int32x4_t res_l_0 = c3_bias;
++                    int32x4_t res_l_1 = c3_bias;
++                    int32x4_t res_h_0 = c3_bias;
++                    int32x4_t res_h_1 = c3_bias;
++
++                    res_l_0 = vmlal_low_n_s16(res_l_0, bl, c0);
++                    res_l_1 = vmlal_high_n_s16(res_l_1, (bl), c0);
++                    res_h_0 = vmlal_low_n_s16(res_h_0, bh, c0);
++                    res_h_1 = vmlal_high_n_s16(res_h_1, (bh), c0);
++
++                    res_l_0 = vmlal_low_n_s16(res_l_0, (gl), c1);
++                    res_l_1 = vmlal_high_n_s16(res_l_1, (gl), c1);
++                    res_h_0 = vmlal_low_n_s16(res_h_0, gh, c1);
++                    res_h_1 = vmlal_high_n_s16(res_h_1, (gh), c1);
++
++                    res_l_0 = vmlaq_s32(res_l_0, rl_low, c2);
++                    res_l_1 = vmlaq_s32(res_l_1, rl_high, c2);
++                    res_h_0 = vmlaq_s32(res_h_0, rh_low, c2);
++                    res_h_1 = vmlaq_s32(res_h_1, rh_high, c2);
++
++                    uint16x8_t res_l_u16 = vqrshrun_high_n_s32(vqrshrun_n_s32(res_l_0, BITS), res_l_1, BITS);
++                    uint16x8_t res_h_u16 = vqrshrun_high_n_s32(vqrshrun_n_s32(res_h_0, BITS), res_h_1, BITS);
++                    return vqmovn_high_u16(vqmovn_u16(res_l_u16), res_h_u16);
++                };
++                uint8x16x3_t v_dst;
++                v_dst.val[0] = calc_chn(m0, m1, vm2, vm3);
++                v_dst.val[1] = calc_chn(m4, m5, vm6, vm7);
++                v_dst.val[2] = calc_chn(m8, m9, vm10, vm11);
++
++                // 交织存储bgr
++                vst3q_u8(dst + i * 3, v_dst);
++            }
++
++            // --- 向量处理结束：记录处理位置 ---
++            int x = (len / 16) * 16;
++
++            // 剩余的像素
++            const int ROUND_DELTA = 512; // 四舍五入的偏移
++            for(; x < len; x++)
++            {
++                int b = src[x * 3];
++                int g = src[x * 3 + 1];
++                int r = src[x * 3 + 2];
++
++                dst[x * 3]     = saturate_cast<uchar>((m0 * b + m1 * g + saturate_cast<int>(m[2] * SCALE) * r + saturate_cast<int>(m[3] * SCALE) + ROUND_DELTA) >> BITS);
++                dst[x * 3 + 1] = saturate_cast<uchar>((m4 * b + m5 * g + saturate_cast<int>(m[6] * SCALE) * r + saturate_cast<int>(m[7] * SCALE) + ROUND_DELTA) >> BITS);
++                dst[x * 3 + 2] = saturate_cast<uchar>((m8 * b + m9 * g + saturate_cast<int>(m[10] * SCALE) * r + saturate_cast<int>(m[11] * SCALE) + ROUND_DELTA) >> BITS);
++            }
++            return ;
++        }
++    }
++#endif
++
+ #if (CV_SIMD || CV_SIMD_SCALABLE)
+     const int BITS = 10, SCALE = 1 << BITS;
+     const float MAX_M = (float)(1 << (15 - BITS));
+@@ -1820,14 +1957,18 @@
+ *                                  Perspective Transform                                 *
+ \****************************************************************************************/
+ 
++#define PT_USE_PARALLEL_PKG_SIZE    16000
++
+ template<typename T> static void
+ perspectiveTransform_( const T* src, T* dst, const double* m, int len, int scn, int dcn )
+ {
+     const double eps = FLT_EPSILON;
+     int i;
++    int threads = getenvT("KCV_ROTATE_T", 16);
+ 
+     if( scn == 2 && dcn == 2 )
+     {
++        #pragma omp parallel for num_threads(threads)
+         for( i = 0; i < len*2; i += 2 )
+         {
+             T x = src[i], y = src[i + 1];
+@@ -1845,6 +1986,7 @@
+     }
+     else if( scn == 3 && dcn == 3 )
+     {
++        #pragma omp parallel for num_threads(threads)
+         for( i = 0; i < len*3; i += 3 )
+         {
+             T x = src[i], y = src[i + 1], z = src[i + 2];
+@@ -1863,19 +2005,20 @@
+     }
+     else if( scn == 3 && dcn == 2 )
+     {
+-        for( i = 0; i < len; i++, src += 3, dst += 2 )
++        #pragma omp parallel for num_threads(threads)
++        for( i = 0; i < len; i++)
+         {
+-            T x = src[0], y = src[1], z = src[2];
++            T x = src[i * 3], y = src[i * 3 + 1], z = src[i * 3 + 2];
+             double w = x*m[8] + y*m[9] + z*m[10] + m[11];
+ 
+             if( fabs(w) > eps )
+             {
+                 w = 1./w;
+-                dst[0] = (T)((x*m[0] + y*m[1] + z*m[2] + m[3])*w);
+-                dst[1] = (T)((x*m[4] + y*m[5] + z*m[6] + m[7])*w);
++                dst[i * 2] = (T)((x*m[0] + y*m[1] + z*m[2] + m[3])*w);
++                dst[i * 2 + 1] = (T)((x*m[4] + y*m[5] + z*m[6] + m[7])*w);
+             }
+             else
+-                dst[0] = dst[1] = (T)0;
++                dst[i * 2] = dst[i * 2 + 1] = (T)0;
+         }
+     }
+     else
+@@ -1905,16 +2048,439 @@
+     }
+ }
+ 
++static void perspectiveTransform_f32(const float *src, float *dst, const double *m, int len, int scn, int dcn)
++{
++    const double eps = FLT_EPSILON;
++    int i = 0;
++
++    if (scn == 2 && dcn == 2) {
++        float64x2_t m0 = vdupq_n_f64(m[0]);
++        float64x2_t m1 = vdupq_n_f64(m[1]);
++        float64x2_t m2 = vdupq_n_f64(m[2]);
++        float64x2_t m3 = vdupq_n_f64(m[3]);
++        float64x2_t m4 = vdupq_n_f64(m[4]);
++        float64x2_t m5 = vdupq_n_f64(m[5]);
++        float64x2_t m6 = vdupq_n_f64(m[6]);
++        float64x2_t m7 = vdupq_n_f64(m[7]);
++        float64x2_t m8 = vdupq_n_f64(m[8]);
++        float64x2_t eps_vec = vdupq_n_f64(eps);
++        float64x2_t one_vec = vdupq_n_f64(1.0);
++
++        for (i = 0; i < len * 2 - 4; i += 4) {
++            float32x2x2_t points = vld2_f32(src + i);
++            float64x2_t x_vec = vcvt_f64_f32(points.val[0]);
++            float64x2_t y_vec = vcvt_f64_f32(points.val[1]);
++
++            float64x2_t w = vmulq_f64(x_vec, m6);
++            w = vmlaq_f64(w, y_vec, m7);
++            w = vaddq_f64(w, m8);
++            float64x2_t abs_w = vabsq_f64(w);
++            uint64x2_t mask = vcgtq_f64(abs_w, eps_vec);
++            float64x2_t w_inv = vdivq_f64(one_vec, w);
++            w_inv = vreinterpretq_f64_u64(vandq_u64(vreinterpretq_u64_f64(w_inv), mask));
++
++            float64x2_t x_transformed = vmulq_f64(x_vec, m0);
++            float64x2_t y_transformed = vmulq_f64(x_vec, m3);
++            x_transformed = vmlaq_f64(x_transformed, y_vec, m1);
++            y_transformed = vmlaq_f64(y_transformed, y_vec, m4);
++            x_transformed = vaddq_f64(x_transformed, m2);
++            y_transformed = vaddq_f64(y_transformed, m5);
++            x_transformed = vmulq_f64(x_transformed, w_inv);
++            y_transformed = vmulq_f64(y_transformed, w_inv);
++
++            float32x2_t x_transformed_f32 = vcvt_f32_f64(x_transformed);
++            float32x2_t y_transformed_f32 = vcvt_f32_f64(y_transformed);
++            float32x2x2_t result = {x_transformed_f32, y_transformed_f32};
++            vst2_f32(dst + i, result);
++        }
++
++        for (; i < len * 2; i += 2) {
++            float x = src[i], y = src[i + 1];
++            double w = x * m[6] + y * m[7] + m[8];
++
++            if (fabs(w) > eps) {
++                w = 1. / w;
++                dst[i] = (float)((x * m[0] + y * m[1] + m[2]) * w);
++                dst[i + 1] = (float)((x * m[3] + y * m[4] + m[5]) * w);
++            } else
++                dst[i] = dst[i + 1] = (float)0;
++        }
++
++    } else if (scn == 3 && dcn == 3) {
++        float64x2_t m0 = vdupq_n_f64(m[0]);
++        float64x2_t m1 = vdupq_n_f64(m[1]);
++        float64x2_t m2 = vdupq_n_f64(m[2]);
++        float64x2_t m3 = vdupq_n_f64(m[3]);
++        float64x2_t m4 = vdupq_n_f64(m[4]);
++        float64x2_t m5 = vdupq_n_f64(m[5]);
++        float64x2_t m6 = vdupq_n_f64(m[6]);
++        float64x2_t m7 = vdupq_n_f64(m[7]);
++        float64x2_t m8 = vdupq_n_f64(m[8]);
++        float64x2_t m9 = vdupq_n_f64(m[9]);
++        float64x2_t m10 = vdupq_n_f64(m[10]);
++        float64x2_t m11 = vdupq_n_f64(m[11]);
++        float64x2_t m12 = vdupq_n_f64(m[12]);
++        float64x2_t m13 = vdupq_n_f64(m[13]);
++        float64x2_t m14 = vdupq_n_f64(m[14]);
++        float64x2_t m15 = vdupq_n_f64(m[15]);
++        float64x2_t eps_vec = vdupq_n_f64(eps);
++        float64x2_t one_vec = vdupq_n_f64(1.0);
++
++        for (i = 0; i < len * 3 - 6; i += 6) {
++            float32x2x3_t points = vld3_f32(src + i);
++            float64x2_t x_vec = vcvt_f64_f32(points.val[0]);
++            float64x2_t y_vec = vcvt_f64_f32(points.val[1]);
++            float64x2_t z_vec = vcvt_f64_f32(points.val[2]);
++
++            float64x2_t w = vmulq_f64(x_vec, m12);
++            w = vmlaq_f64(w, y_vec, m13);
++            w = vmlaq_f64(w, z_vec, m14);
++            w = vaddq_f64(w, m15);
++            float64x2_t abs_w = vabsq_f64(w);
++            uint64x2_t mask = vcgtq_f64(abs_w, eps_vec);
++            float64x2_t w_inv = vdivq_f64(one_vec, w);
++            w_inv = vreinterpretq_f64_u64(vandq_u64(vreinterpretq_u64_f64(w_inv), mask));
++
++            float64x2_t x_transformed = vmulq_f64(x_vec, m0);
++            float64x2_t y_transformed = vmulq_f64(x_vec, m4);
++            float64x2_t z_transformed = vmulq_f64(x_vec, m8);
++            x_transformed = vmlaq_f64(x_transformed, y_vec, m1);
++            y_transformed = vmlaq_f64(y_transformed, y_vec, m5);
++            z_transformed = vmlaq_f64(z_transformed, y_vec, m9);
++            x_transformed = vmlaq_f64(x_transformed, z_vec, m2);
++            y_transformed = vmlaq_f64(y_transformed, z_vec, m6);
++            z_transformed = vmlaq_f64(z_transformed, z_vec, m10);
++            x_transformed = vaddq_f64(x_transformed, m3);
++            y_transformed = vaddq_f64(y_transformed, m7);
++            z_transformed = vaddq_f64(z_transformed, m11);
++            x_transformed = vmulq_f64(x_transformed, w_inv);
++            y_transformed = vmulq_f64(y_transformed, w_inv);
++            z_transformed = vmulq_f64(z_transformed, w_inv);
++
++            float32x2_t x_transformed_f32 = vcvt_f32_f64(x_transformed);
++            float32x2_t y_transformed_f32 = vcvt_f32_f64(y_transformed);
++            float32x2_t z_transformed_f32 = vcvt_f32_f64(z_transformed);
++            float32x2x3_t result = {x_transformed_f32, y_transformed_f32, z_transformed_f32};
++            vst3_f32(dst + i, result);
++        }
++
++        for (; i < len * 3; i += 3) {
++            float x = src[i], y = src[i + 1], z = src[i + 2];
++            double w = x * m[12] + y * m[13] + z * m[14] + m[15];
++
++            if (fabs(w) > eps) {
++                w = 1. / w;
++                dst[i] = (float)((x * m[0] + y * m[1] + z * m[2] + m[3]) * w);
++                dst[i + 1] = (float)((x * m[4] + y * m[5] + z * m[6] + m[7]) * w);
++                dst[i + 2] = (float)((x * m[8] + y * m[9] + z * m[10] + m[11]) * w);
++            } else
++                dst[i] = dst[i + 1] = dst[i + 2] = (float)0;
++        }
++
++    } else if (scn == 3 && dcn == 2) {
++        float64x2_t m0 = vdupq_n_f64(m[0]);
++        float64x2_t m1 = vdupq_n_f64(m[1]);
++        float64x2_t m2 = vdupq_n_f64(m[2]);
++        float64x2_t m3 = vdupq_n_f64(m[3]);
++        float64x2_t m4 = vdupq_n_f64(m[4]);
++        float64x2_t m5 = vdupq_n_f64(m[5]);
++        float64x2_t m6 = vdupq_n_f64(m[6]);
++        float64x2_t m7 = vdupq_n_f64(m[7]);
++        float64x2_t m8 = vdupq_n_f64(m[8]);
++        float64x2_t m9 = vdupq_n_f64(m[9]);
++        float64x2_t m10 = vdupq_n_f64(m[10]);
++        float64x2_t m11 = vdupq_n_f64(m[11]);
++        float64x2_t eps_vec = vdupq_n_f64(eps);
++        float64x2_t one_vec = vdupq_n_f64(1.0);
++
++        for (i = 0; i < len - 2; i += 2) {
++            float32x2x3_t points = vld3_f32(src + i * 3);
++            float64x2_t x_vec = vcvt_f64_f32(points.val[0]);
++            float64x2_t y_vec = vcvt_f64_f32(points.val[1]);
++            float64x2_t z_vec = vcvt_f64_f32(points.val[2]);
++
++            float64x2_t w = vmulq_f64(x_vec, m8);
++            w = vmlaq_f64(w, y_vec, m9);
++            w = vmlaq_f64(w, z_vec, m10);
++            w = vaddq_f64(w, m11);
++
++            float64x2_t abs_w = vabsq_f64(w);
++            uint64x2_t mask = vcgtq_f64(abs_w, eps_vec);
++            float64x2_t w_inv = vdivq_f64(one_vec, w);
++            w_inv = vreinterpretq_f64_u64(vandq_u64(vreinterpretq_u64_f64(w_inv), mask));
++
++            float64x2_t x_transformed = vmulq_f64(x_vec, m0);
++            float64x2_t y_transformed = vmulq_f64(x_vec, m4);
++            x_transformed = vmlaq_f64(x_transformed, y_vec, m1);
++            y_transformed = vmlaq_f64(y_transformed, y_vec, m5);
++            x_transformed = vmlaq_f64(x_transformed, z_vec, m2);
++            y_transformed = vmlaq_f64(y_transformed, z_vec, m6);
++            x_transformed = vaddq_f64(x_transformed, m3);
++            y_transformed = vaddq_f64(y_transformed, m7);
++            x_transformed = vmulq_f64(x_transformed, w_inv);
++            y_transformed = vmulq_f64(y_transformed, w_inv);
++
++            float32x2_t x_transformed_f32 = vcvt_f32_f64(x_transformed);
++            float32x2_t y_transformed_f32 = vcvt_f32_f64(y_transformed);
++            float32x2x2_t result = {x_transformed_f32, y_transformed_f32};
++            vst2_f32(dst + i * 2, result);
++        }
++
++        for (; i < len; ++i) {
++            float x = src[i * 3], y = src[i * 3 + 1], z = src[i * 3 + 2];
++            double w = x * m[8] + y * m[9] + z * m[10] + m[11];
++
++            if (fabs(w) > eps) {
++                w = 1. / w;
++                dst[i * 2] = (float)((x * m[0] + y * m[1] + z * m[2] + m[3]) * w);
++                dst[i * 2 + 1] = (float)((x * m[4] + y * m[5] + z * m[6] + m[7]) * w);
++            } else
++                dst[i * 2] = dst[i * 2 + 1] = (float)0;
++        }
++
++    } else {
++        for (i = 0; i < len; i++, src += scn, dst += dcn) {
++            const double *_m = m + dcn * (scn + 1);
++            double w = _m[scn];
++            int j, k;
++            for (k = 0; k < scn; k++)
++                w += _m[k] * src[k];
++            if (fabs(w) > eps) {
++                _m = m;
++                for (j = 0; j < dcn; j++, _m += scn + 1) {
++                    double s = _m[scn];
++                    for (k = 0; k < scn; k++)
++                        s += _m[k] * src[k];
++                    dst[j] = (float)(s * w);
++                }
++            } else
++                for (j = 0; j < dcn; j++)
++                    dst[j] = 0;
++        }
++    }
++}
++
++static void perspectiveTransform_f64(const double *src, double *dst, const double *m, int len, int scn, int dcn)
++{
++    const double eps = FLT_EPSILON;
++    int i = 0;
++
++    if (scn == 2 && dcn == 2) {
++        float64x2_t m0 = vdupq_n_f64(m[0]);
++        float64x2_t m1 = vdupq_n_f64(m[1]);
++        float64x2_t m2 = vdupq_n_f64(m[2]);
++        float64x2_t m3 = vdupq_n_f64(m[3]);
++        float64x2_t m4 = vdupq_n_f64(m[4]);
++        float64x2_t m5 = vdupq_n_f64(m[5]);
++        float64x2_t m6 = vdupq_n_f64(m[6]);
++        float64x2_t m7 = vdupq_n_f64(m[7]);
++        float64x2_t m8 = vdupq_n_f64(m[8]);
++        float64x2_t eps_vec = vdupq_n_f64(eps);
++        float64x2_t one_vec = vdupq_n_f64(1.0);
++
++        for (i = 0; i < len * 2 - 4; i += 4) {
++            float64x2x2_t points = vld2q_f64(src + i);
++            float64x2_t x_vec = points.val[0];
++            float64x2_t y_vec = points.val[1];
++
++            float64x2_t w = vmulq_f64(x_vec, m6);
++            w = vmlaq_f64(w, y_vec, m7);
++            w = vaddq_f64(w, m8);
++            float64x2_t abs_w = vabsq_f64(w);
++            uint64x2_t mask = vcgtq_f64(abs_w, eps_vec);
++            float64x2_t w_inv = vdivq_f64(one_vec, w);
++            w_inv = vreinterpretq_f64_u64(vandq_u64(vreinterpretq_u64_f64(w_inv), mask));
++
++            float64x2_t x_transformed = vmulq_f64(x_vec, m0);
++            float64x2_t y_transformed = vmulq_f64(x_vec, m3);
++            x_transformed = vmlaq_f64(x_transformed, y_vec, m1);
++            y_transformed = vmlaq_f64(y_transformed, y_vec, m4);
++            x_transformed = vaddq_f64(x_transformed, m2);
++            y_transformed = vaddq_f64(y_transformed, m5);
++            x_transformed = vmulq_f64(x_transformed, w_inv);
++            y_transformed = vmulq_f64(y_transformed, w_inv);
++
++            float64x2x2_t result = {x_transformed, y_transformed};
++            vst2q_f64(dst + i, result);
++        }
++
++        for (; i < len * 2; i += 2) {
++            double x = src[i], y = src[i + 1];
++            double w = x * m[6] + y * m[7] + m[8];
++
++            if (fabs(w) > eps) {
++                w = 1. / w;
++                dst[i] = (double)((x * m[0] + y * m[1] + m[2]) * w);
++                dst[i + 1] = (double)((x * m[3] + y * m[4] + m[5]) * w);
++            } else
++                dst[i] = dst[i + 1] = (double)0;
++        }
++
++    } else if (scn == 3 && dcn == 3) {
++        float64x2_t m0 = vdupq_n_f64(m[0]);
++        float64x2_t m1 = vdupq_n_f64(m[1]);
++        float64x2_t m2 = vdupq_n_f64(m[2]);
++        float64x2_t m3 = vdupq_n_f64(m[3]);
++        float64x2_t m4 = vdupq_n_f64(m[4]);
++        float64x2_t m5 = vdupq_n_f64(m[5]);
++        float64x2_t m6 = vdupq_n_f64(m[6]);
++        float64x2_t m7 = vdupq_n_f64(m[7]);
++        float64x2_t m8 = vdupq_n_f64(m[8]);
++        float64x2_t m9 = vdupq_n_f64(m[9]);
++        float64x2_t m10 = vdupq_n_f64(m[10]);
++        float64x2_t m11 = vdupq_n_f64(m[11]);
++        float64x2_t m12 = vdupq_n_f64(m[12]);
++        float64x2_t m13 = vdupq_n_f64(m[13]);
++        float64x2_t m14 = vdupq_n_f64(m[14]);
++        float64x2_t m15 = vdupq_n_f64(m[15]);
++        float64x2_t eps_vec = vdupq_n_f64(eps);
++        float64x2_t one_vec = vdupq_n_f64(1.0);
++
++        for (i = 0; i < len * 3 - 6; i += 6) {
++            float64x2x3_t points = vld3q_f64(src + i);
++            float64x2_t x_vec = points.val[0];
++            float64x2_t y_vec = points.val[1];
++            float64x2_t z_vec = points.val[2];
++
++            float64x2_t w = vmulq_f64(x_vec, m12);
++            w = vmlaq_f64(w, y_vec, m13);
++            w = vmlaq_f64(w, z_vec, m14);
++            w = vaddq_f64(w, m15);
++            float64x2_t abs_w = vabsq_f64(w);
++            uint64x2_t mask = vcgtq_f64(abs_w, eps_vec);
++            float64x2_t w_inv = vdivq_f64(one_vec, w);
++            w_inv = vreinterpretq_f64_u64(vandq_u64(vreinterpretq_u64_f64(w_inv), mask));
++
++            float64x2_t x_transformed = vmulq_f64(x_vec, m0);
++            float64x2_t y_transformed = vmulq_f64(x_vec, m4);
++            float64x2_t z_transformed = vmulq_f64(x_vec, m8);
++            x_transformed = vmlaq_f64(x_transformed, y_vec, m1);
++            y_transformed = vmlaq_f64(y_transformed, y_vec, m5);
++            z_transformed = vmlaq_f64(z_transformed, y_vec, m9);
++            x_transformed = vmlaq_f64(x_transformed, z_vec, m2);
++            y_transformed = vmlaq_f64(y_transformed, z_vec, m6);
++            z_transformed = vmlaq_f64(z_transformed, z_vec, m10);
++            x_transformed = vaddq_f64(x_transformed, m3);
++            y_transformed = vaddq_f64(y_transformed, m7);
++            z_transformed = vaddq_f64(z_transformed, m11);
++            x_transformed = vmulq_f64(x_transformed, w_inv);
++            y_transformed = vmulq_f64(y_transformed, w_inv);
++            z_transformed = vmulq_f64(z_transformed, w_inv);
++
++            float64x2x3_t result = {x_transformed, y_transformed, z_transformed};
++            vst3q_f64(dst + i, result);
++        }
++
++        for (; i < len * 3; i += 3) {
++            double x = src[i], y = src[i + 1], z = src[i + 2];
++            double w = x * m[12] + y * m[13] + z * m[14] + m[15];
++
++            if (fabs(w) > eps) {
++                w = 1. / w;
++                dst[i] = (double)((x * m[0] + y * m[1] + z * m[2] + m[3]) * w);
++                dst[i + 1] = (double)((x * m[4] + y * m[5] + z * m[6] + m[7]) * w);
++                dst[i + 2] = (double)((x * m[8] + y * m[9] + z * m[10] + m[11]) * w);
++            } else
++                dst[i] = dst[i + 1] = dst[i + 2] = (double)0;
++        }
++
++    } else if (scn == 3 && dcn == 2) {
++        float64x2_t m0 = vdupq_n_f64(m[0]);
++        float64x2_t m1 = vdupq_n_f64(m[1]);
++        float64x2_t m2 = vdupq_n_f64(m[2]);
++        float64x2_t m3 = vdupq_n_f64(m[3]);
++        float64x2_t m4 = vdupq_n_f64(m[4]);
++        float64x2_t m5 = vdupq_n_f64(m[5]);
++        float64x2_t m6 = vdupq_n_f64(m[6]);
++        float64x2_t m7 = vdupq_n_f64(m[7]);
++        float64x2_t m8 = vdupq_n_f64(m[8]);
++        float64x2_t m9 = vdupq_n_f64(m[9]);
++        float64x2_t m10 = vdupq_n_f64(m[10]);
++        float64x2_t m11 = vdupq_n_f64(m[11]);
++        float64x2_t eps_vec = vdupq_n_f64(eps);
++        float64x2_t one_vec = vdupq_n_f64(1.0);
++
++        for (i = 0; i < len - 2; i += 2) {
++            float64x2x3_t points = vld3q_f64(src + i * 3);
++            float64x2_t x_vec = points.val[0];
++            float64x2_t y_vec = points.val[1];
++            float64x2_t z_vec = points.val[2];
++
++            float64x2_t w = vmulq_f64(x_vec, m8);
++            w = vmlaq_f64(w, y_vec, m9);
++            w = vmlaq_f64(w, z_vec, m10);
++            w = vaddq_f64(w, m11);
++
++            float64x2_t abs_w = vabsq_f64(w);
++            uint64x2_t mask = vcgtq_f64(abs_w, eps_vec);
++            float64x2_t w_inv = vdivq_f64(one_vec, w);
++            w_inv = vreinterpretq_f64_u64(vandq_u64(vreinterpretq_u64_f64(w_inv), mask));
++
++            float64x2_t x_transformed = vmulq_f64(x_vec, m0);
++            float64x2_t y_transformed = vmulq_f64(x_vec, m4);
++            x_transformed = vmlaq_f64(x_transformed, y_vec, m1);
++            y_transformed = vmlaq_f64(y_transformed, y_vec, m5);
++            x_transformed = vmlaq_f64(x_transformed, z_vec, m2);
++            y_transformed = vmlaq_f64(y_transformed, z_vec, m6);
++            x_transformed = vaddq_f64(x_transformed, m3);
++            y_transformed = vaddq_f64(y_transformed, m7);
++            x_transformed = vmulq_f64(x_transformed, w_inv);
++            y_transformed = vmulq_f64(y_transformed, w_inv);
++
++            float64x2x2_t result = {x_transformed, y_transformed};
++            vst2q_f64(dst + i * 2, result);
++        }
++
++        for (; i < len; ++i) {
++            double x = src[i * 3], y = src[i * 3 + 1], z = src[i * 3 + 2];
++            double w = x * m[8] + y * m[9] + z * m[10] + m[11];
++
++            if (fabs(w) > eps) {
++                w = 1. / w;
++                dst[i * 2] = (double)((x * m[0] + y * m[1] + z * m[2] + m[3]) * w);
++                dst[i * 2 + 1] = (double)((x * m[4] + y * m[5] + z * m[6] + m[7]) * w);
++            } else
++                dst[i * 2] = dst[i * 2 + 1] = (double)0;
++        }
++
++    } else {
++        for (i = 0; i < len; i++, src += scn, dst += dcn) {
++            const double *_m = m + dcn * (scn + 1);
++            double w = _m[scn];
++            int j, k;
++            for (k = 0; k < scn; k++)
++                w += _m[k] * src[k];
++            if (fabs(w) > eps) {
++                _m = m;
++                for (j = 0; j < dcn; j++, _m += scn + 1) {
++                    double s = _m[scn];
++                    for (k = 0; k < scn; k++)
++                        s += _m[k] * src[k];
++                    dst[j] = (double)(s * w);
++                }
++            } else
++                for (j = 0; j < dcn; j++)
++                    dst[j] = 0;
++        }
++    }
++}
++
+ static void
+ perspectiveTransform_32f(const float* src, float* dst, const double* m, int len, int scn, int dcn)
+ {
+-    perspectiveTransform_(src, dst, m, len, scn, dcn);
++    if (len * scn * dcn >= PT_USE_PARALLEL_PKG_SIZE)
++        perspectiveTransform_(src, dst, m, len, scn, dcn);
++    else
++        perspectiveTransform_f32(src, dst, m, len, scn, dcn);
+ }
+ 
+ static void
+ perspectiveTransform_64f(const double* src, double* dst, const double* m, int len, int scn, int dcn)
+ {
+-    perspectiveTransform_(src, dst, m, len, scn, dcn);
++    if (len * scn * dcn >= PT_USE_PARALLEL_PKG_SIZE)
++        perspectiveTransform_(src, dst, m, len, scn, dcn);
++    else
++        perspectiveTransform_f64(src, dst, m, len, scn, dcn);
+ }
+ 
+ TransformFunc getPerspectiveTransform(int depth)
+diff -Naur opencv-4.10.0/modules/core/src/matrix_decomp.cpp opencv/modules/core/src/matrix_decomp.cpp
+--- opencv-4.10.0/modules/core/src/matrix_decomp.cpp	2024-06-02 19:41:07.000000000 +0800
++++ opencv/modules/core/src/matrix_decomp.cpp	2026-02-09 14:42:38.839195305 +0800
+@@ -10,10 +10,87 @@
+ /****************************************************************************************\
+ *                     LU & Cholesky implementation for small matrices                    *
+ \****************************************************************************************/
++template<typename _Tp> static inline int
++LUImpl_SIMD(_Tp* A, size_t astep, int m, _Tp* b, size_t bstep, int n, _Tp eps)
++{
++    int i, j, k, p = 1;
++    astep /= sizeof(_Tp);
++    bstep /= sizeof(_Tp);
++
++    for( i = 0; i < m; i++ )
++    {
++        k = i;
++        _Tp maxVal = std::abs(A[i * astep + i]);
++        for (j = i + 1; j < m; j++) {
++            _Tp val = std::abs(A[j * astep + i]);
++            if (val > maxVal) {
++                maxVal = val;
++                k = j;
++            }
++        }
++
++        if( maxVal < eps ) return 0;
++
++        if( k != i )
++        {
++            _Tp* rowI = A + i * astep;
++            _Tp* rowK = A + k * astep;
++            for (j = i; j < m; j++) std::swap(rowI[j], rowK[j]);
++
++            if (b) {
++                _Tp* bI = b + i * bstep;
++                _Tp* bK = b + k * bstep;
++                for (j = 0; j < n; j++) std::swap(bI[j], bK[j]);
++            }
++            p = -p;
++        }
++
++        _Tp pivotInv = -1 / A[i * astep + i];
++        _Tp* rowI = A + i * astep;
++
++        for( j = i + 1; j < m; j++ )
++        {
++            _Tp* rowJ = A + j * astep;
++            _Tp alpha = rowJ[i] * pivotInv;
++
++            #pragma omp simd
++            for( k = i + 1; k < m; k++ )
++                rowJ[k] += alpha * rowI[k];
++
++            if( b ) {
++                _Tp* bI = b + i * bstep;
++                _Tp* bJ = b + j * bstep;
++                #pragma omp simd
++                for( k = 0; k < n; k++ )
++                    bJ[k] += alpha * bI[k];
++            }
++        }
++    }
++
++    if( b )
++    {
++        for( i = m - 1; i >= 0; i-- )
++        {
++            _Tp invDiag = 1 / A[i * astep + i];
++            _Tp* rowI = A + i * astep;
++            for( j = 0; j < n; j++ )
++            {
++                _Tp s = b[i * bstep + j];
++                for( k = i + 1; k < m; k++ )
++                    s -= rowI[k] * b[k * bstep + j];
++                b[i * bstep + j] = s * invDiag;
++            }
++        }
++    }
+ 
++    return p;
++}
+ template<typename _Tp> static inline int
+ LUImpl(_Tp* A, size_t astep, int m, _Tp* b, size_t bstep, int n, _Tp eps)
+ {
++    if( m > 8){
++        return LUImpl_SIMD<_Tp>(A, astep, m, b, bstep, n, eps);
++    }
+     int i, j, k, p = 1;
+     astep /= sizeof(A[0]);
+     bstep /= sizeof(b[0]);
+diff -Naur opencv-4.10.0/modules/core/src/matrix_operations.cpp opencv/modules/core/src/matrix_operations.cpp
+--- opencv-4.10.0/modules/core/src/matrix_operations.cpp	2024-06-02 19:41:07.000000000 +0800
++++ opencv/modules/core/src/matrix_operations.cpp	2026-02-09 14:42:38.839195305 +0800
+@@ -280,23 +280,84 @@
+ 
+ ////////////////////////////////////// completeSymm /////////////////////////////////////////
+ 
+-void cv::completeSymm( InputOutputArray _m, bool LtoR )
++void cv::completeSymm(InputOutputArray _m, bool LtoR)
+ {
+     CV_INSTRUMENT_REGION();
+ 
+     Mat m = _m.getMat();
+-    size_t step = m.step, esz = m.elemSize();
+-    CV_Assert( m.dims <= 2 && m.rows == m.cols );
++    CV_Assert(m.dims <= 2 && m.rows == m.cols);
+ 
+-    int rows = m.rows;
+-    int j0 = 0, j1 = rows;
++    int n = m.rows;
++    size_t step = m.step;
++    size_t esz = m.elemSize();
++    uchar* data = m.data;
+ 
+-    uchar* data = m.ptr();
+-    for( int i = 0; i < rows; i++ )
++    const int BLOCK_SIZE = 32;
++
++    if (esz == 4)
++    {
++        for (int i = 0; i < n; i += BLOCK_SIZE)
++        {
++            for (int j = 0; j < n; j += BLOCK_SIZE)
++            {
++                int i_limit = std::min(i + BLOCK_SIZE, n);
++                int j_limit = std::min(j + BLOCK_SIZE, n);
++
++                for (int ii = i; ii < i_limit; ++ii)
++                {
++                    int* row_i = (int*)(data + ii * step);
++                    for (int jj = std::max(j, LtoR ? ii + 1 : 0); jj < (LtoR ? j_limit : std::min(j_limit, ii)); ++jj)
++                    {
++                        int* row_j = (int*)(data + jj * step);
++                        if (LtoR) row_i[jj] = row_j[ii];
++                        else      row_j[ii] = row_i[jj];
++                    }
++                }
++            }
++        }
++    }
++    else if (esz == 8)
++    {
++        for (int i = 0; i < n; i += BLOCK_SIZE)
++        {
++            for (int j = 0; j < n; j += BLOCK_SIZE)
++            {
++                int i_limit = std::min(i + BLOCK_SIZE, n);
++                int j_limit = std::min(j + BLOCK_SIZE, n);
++
++                for (int ii = i; ii < i_limit; ++ii)
++                {
++                    int64* row_i = (int64*)(data + ii * step);
++                    for (int jj = std::max(j, LtoR ? ii + 1 : 0); jj < (LtoR ? j_limit : std::min(j_limit, ii)); ++jj)
++                    {
++                        int64* row_j = (int64*)(data + jj * step);
++                        if (LtoR) row_i[jj] = row_j[ii];
++                        else      row_j[ii] = row_i[jj];
++                    }
++                }
++            }
++        }
++    }
++    else
+     {
+-        if( !LtoR ) j1 = i; else j0 = i+1;
+-        for( int j = j0; j < j1; j++ )
+-            memcpy(data + (i*step + j*esz), data + (j*step + i*esz), esz);
++        if (LtoR)
++        {
++            for (int i = 0; i < n; i++)
++            {
++                uchar* row_i = data + i * step;
++                for (int j = i + 1; j < n; j++)
++                    memcpy(row_i + j * esz, data + j * step + i * esz, esz);
++            }
++        }
++        else
++        {
++            for (int i = 0; i < n; i++)
++            {
++                uchar* row_i = data + i * step;
++                for (int j = 0; j < i; j++)
++                    memcpy(row_i + j * esz, data + j * step + i * esz, esz);
++            }
++        }
+     }
+ }
+ 
+diff -Naur opencv-4.10.0/modules/core/src/matrix_transform.cpp opencv/modules/core/src/matrix_transform.cpp
+--- opencv-4.10.0/modules/core/src/matrix_transform.cpp	2024-06-02 19:41:07.000000000 +0800
++++ opencv/modules/core/src/matrix_transform.cpp	2026-02-09 14:42:38.839195305 +0800
+@@ -9,6 +9,7 @@
+ 
+ #include <algorithm> // std::swap_ranges
+ #include <numeric> // std::accumulate
++#include <omp.h>
+ 
+ namespace cv {
+ 
+@@ -17,10 +18,14 @@
+ template<typename T> static void
+ transpose_( const uchar* src, size_t sstep, uchar* dst, size_t dstep, Size sz )
+ {
+-    int i=0, j, m = sz.width, n = sz.height;
++    int m = sz.width, n = sz.height;
++    int i_limit = m - 4;
+ 
+     #if CV_ENABLE_UNROLLED
+-    for(; i <= m - 4; i += 4 )
++    int i = 0, j;
++    int threads = getenvT("KCV_ROTATE_T", 16);
++    #pragma omp parallel for private(j) num_threads(threads)
++    for(i = 0; i <= i_limit; i += 4 )
+     {
+         T* d0 = (T*)(dst + dstep*i);
+         T* d1 = (T*)(dst + dstep*(i+1));
+@@ -47,29 +52,29 @@
+         }
+     }
+     #endif
+-    for( ; i < m; i++ )
++
++    for( int k = (m >= 4 ? (m & -4) : 0); k < m; k++ )
+     {
+-        T* d0 = (T*)(dst + dstep*i);
+-        j = 0;
++        T* d0 = (T*)(dst + dstep*k);
++        int q = 0;
+         #if CV_ENABLE_UNROLLED
+-        for(; j <= n - 4; j += 4 )
++        for(; q <= n - 4; q += 4 )
+         {
+-            const T* s0 = (const T*)(src + i*sizeof(T) + sstep*j);
+-            const T* s1 = (const T*)(src + i*sizeof(T) + sstep*(j+1));
+-            const T* s2 = (const T*)(src + i*sizeof(T) + sstep*(j+2));
+-            const T* s3 = (const T*)(src + i*sizeof(T) + sstep*(j+3));
++            const T* s0 = (const T*)(src + k*sizeof(T) + sstep*q);
++            const T* s1 = (const T*)(src + k*sizeof(T) + sstep*(q+1));
++            const T* s2 = (const T*)(src + k*sizeof(T) + sstep*(q+2));
++            const T* s3 = (const T*)(src + k*sizeof(T) + sstep*(q+3));
+ 
+-            d0[j] = s0[0]; d0[j+1] = s1[0]; d0[j+2] = s2[0]; d0[j+3] = s3[0];
++            d0[q] = s0[0]; d0[q+1] = s1[0]; d0[q+2] = s2[0]; d0[q+3] = s3[0];
+         }
+         #endif
+-        for( ; j < n; j++ )
++        for( ; q < n; q++ )
+         {
+-            const T* s0 = (const T*)(src + i*sizeof(T) + j*sstep);
+-            d0[j] = s0[0];
++            const T* s0 = (const T*)(src + k*sizeof(T) + q*sstep);
++            d0[q] = s0[0];
+         }
+     }
+ }
+-
+ template<typename T> static void
+ transposeI_( uchar* data, size_t step, int n )
+ {
+@@ -444,75 +449,61 @@
+ static void
+ flipHoriz( const uchar* src, size_t sstep, uchar* dst, size_t dstep, Size size, size_t esz )
+ {
++    bool use_parallel = (size.height * size.width * esz >= (1 << 16)) && (size.height > 8);
++    int threads = getenvT("KCV_ROTATE_T", 16);
++
++    const uchar* src_base = src;
++    uchar* dst_base = dst;
++
+ #if CV_SIMD128
+ #if CV_STRONG_ALIGNMENT
+     size_t alignmentMark = ((size_t)src)|((size_t)dst)|sstep|dstep;
+ #endif
+-    if (esz == 2 * (size_t)VTraits<v_uint8x16>::vlanes())
+-    {
+-        int end = (int)(size.width*esz);
+-        int width = end/2;
+ 
+-        for( ; size.height--; src += sstep, dst += dstep )
++    if (esz == 4
++#if CV_STRONG_ALIGNMENT
++            && isAligned<sizeof(unsigned)>(alignmentMark)
++#endif
++    )
++    {
++        if (use_parallel)
+         {
+-            for( int i = 0, j = end - 2 * VTraits<v_uint8x16>::vlanes(); i < width; i += 2 * VTraits<v_uint8x16>::vlanes(), j -= 2 * VTraits<v_uint8x16>::vlanes() )
++            int end = (int)(size.width * 4);
++            int width = (end + 1) / 2;
++            int width_1 = width & -VTraits<v_uint32x4>::vlanes() * 4; // *4 因为是字节偏移
++
++            #pragma omp parallel for num_threads(threads)
++            for (int y = 0; y < size.height; y++)
+             {
+-#if CV_SIMD256
+-                v_uint8x32 t0, t1;
++                const uchar* r_src = src_base + y * sstep;
++                uchar* r_dst = dst_base + y * dstep;
++                int i, j;
+ 
+-                t0 = v256_load((uchar*)src + i);
+-                t1 = v256_load((uchar*)src + j);
+-                v_store(dst + j, t0);
+-                v_store(dst + i, t1);
+-#else
+-                v_uint8x16 t0, t1, t2, t3;
++                for (i = 0, j = end; i < width_1; i += VTraits<v_uint32x4>::vlanes() * 4, j -= VTraits<v_uint32x4>::vlanes() * 4)
++                {
++                    v_uint32x4 t0, t1;
++                    t0 = v_load((unsigned*)(r_src + i));
++                    t1 = v_load((unsigned*)(r_src + j - VTraits<v_uint32x4>::vlanes() * 4));
++                    t0 = v_reverse(t0);
++                    t1 = v_reverse(t1);
++                    v_store((unsigned*)(r_dst + j - VTraits<v_uint32x4>::vlanes() * 4), t0);
++                    v_store((unsigned*)(r_dst + i), t1);
++                }
+ 
+-                t0 = v_load((uchar*)src + i);
+-                t1 = v_load((uchar*)src + i + VTraits<v_uint8x16>::vlanes());
+-                t2 = v_load((uchar*)src + j);
+-                t3 = v_load((uchar*)src + j + VTraits<v_uint8x16>::vlanes());
+-                v_store(dst + j, t0);
+-                v_store(dst + j + VTraits<v_uint8x16>::vlanes(), t1);
+-                v_store(dst + i, t2);
+-                v_store(dst + i + VTraits<v_uint8x16>::vlanes(), t3);
+-#endif
++                for (; i < width; i += 4, j -= 4)
++                {
++                    unsigned t0 = *((unsigned*)(r_src + i));
++                    unsigned t1 = *((unsigned*)(r_src + j - 4));
++                    *((unsigned*)(r_dst + j - 4)) = t0;
++                    *((unsigned*)(r_dst + i)) = t1;
++                }
+             }
+         }
+-    }
+-    else if (esz == (size_t)VTraits<v_uint8x16>::vlanes())
+-    {
+-        int end = (int)(size.width*esz);
+-        int width = end/2;
+-
+-        for( ; size.height--; src += sstep, dst += dstep )
++        else
+         {
+-            for( int i = 0, j = end - VTraits<v_uint8x16>::vlanes(); i < width; i += VTraits<v_uint8x16>::vlanes(), j -= VTraits<v_uint8x16>::vlanes() )
+-            {
+-                v_uint8x16 t0, t1;
+-
+-                t0 = v_load((uchar*)src + i);
+-                t1 = v_load((uchar*)src + j);
+-                v_store(dst + j, t0);
+-                v_store(dst + i, t1);
+-            }
++            flipHoriz_single<v_uint32x4>(src, sstep, dst, dstep, size, esz);
+         }
+     }
+-    else if (esz == 8
+-#if CV_STRONG_ALIGNMENT
+-            && isAligned<sizeof(uint64)>(alignmentMark)
+-#endif
+-    )
+-    {
+-        flipHoriz_single<v_uint64x2>(src, sstep, dst, dstep, size, esz);
+-    }
+-    else if (esz == 4
+-#if CV_STRONG_ALIGNMENT
+-            && isAligned<sizeof(unsigned)>(alignmentMark)
+-#endif
+-    )
+-    {
+-        flipHoriz_single<v_uint32x4>(src, sstep, dst, dstep, size, esz);
+-    }
+     else if (esz == 2
+ #if CV_STRONG_ALIGNMENT
+             && isAligned<sizeof(ushort)>(alignmentMark)
+@@ -523,7 +514,43 @@
+     }
+     else if (esz == 1)
+     {
+-        flipHoriz_single<v_uint8x16>(src, sstep, dst, dstep, size, esz);
++        if (use_parallel)
++        {
++            int end = (int)(size.width);
++            int width = (end + 1) / 2;
++            int width_1 = width & -VTraits<v_uint8x16>::vlanes();
++
++            #pragma omp parallel for num_threads(threads)
++            for (int y = 0; y < size.height; y++)
++            {
++                const uchar* r_src = src_base + y * sstep;
++                uchar* r_dst = dst_base + y * dstep;
++                int i, j;
++
++                for (i = 0, j = end; i < width_1; i += VTraits<v_uint8x16>::vlanes(), j -= VTraits<v_uint8x16>::vlanes())
++                {
++                    v_uint8x16 t0, t1;
++                    t0 = v_load((uchar*)r_src + i);
++                    t1 = v_load((uchar*)r_src + j - VTraits<v_uint8x16>::vlanes());
++                    t0 = v_reverse(t0);
++                    t1 = v_reverse(t1);
++                    v_store(r_dst + j - VTraits<v_uint8x16>::vlanes(), t0);
++                    v_store(r_dst + i, t1);
++                }
++                // 尾部 scalar 处理
++                for (; i < width; i++, j--)
++                {
++                    uchar t0 = r_src[i];
++                    uchar t1 = r_src[j - 1];
++                    r_dst[j - 1] = t0;
++                    r_dst[i] = t1;
++                }
++            }
++        }
++        else
++        {
++            flipHoriz_single<v_uint8x16>(src, sstep, dst, dstep, size, esz);
++        }
+     }
+     else if (esz == 24
+ #if CV_STRONG_ALIGNMENT
+@@ -533,14 +560,11 @@
+     {
+         int end = (int)(size.width*esz);
+         int width = (end + 1)/2;
+-
+-        for( ; size.height--; src += sstep, dst += dstep )
+-        {
+-            for ( int i = 0, j = end; i < width; i += VTraits<v_uint8x16>::vlanes() + sizeof(uint64_t), j -= VTraits<v_uint8x16>::vlanes() + sizeof(uint64_t) )
++        for( ; size.height--; src += sstep, dst += dstep ) {
++             for ( int i = 0, j = end; i < width; i += VTraits<v_uint8x16>::vlanes() + sizeof(uint64_t), j -= VTraits<v_uint8x16>::vlanes() + sizeof(uint64_t) )
+             {
+                 v_uint8x16 t0, t1;
+                 uint64_t t2, t3;
+-
+                 t0 = v_load((uchar*)src + i);
+                 t2 = *((uint64_t*)((uchar*)src + i + VTraits<v_uint8x16>::vlanes()));
+                 t1 = v_load((uchar*)src + j - VTraits<v_uint8x16>::vlanes() - sizeof(uint64_t));
+@@ -553,52 +577,103 @@
+         }
+     }
+ #if !CV_STRONG_ALIGNMENT
+-    else if (esz == 12)
+-    {
+-        flipHoriz_double<uint64_t,uint>(src, sstep, dst, dstep, size, esz);
+-    }
+-    else if (esz == 6)
+-    {
+-        flipHoriz_double<uint,ushort>(src, sstep, dst, dstep, size, esz);
+-    }
+     else if (esz == 3)
+     {
+-        flipHoriz_double<ushort,uchar>(src, sstep, dst, dstep, size, esz);
++        if (use_parallel)
++        {
++            int end = (int)(size.width * 3);
++            int width = (end + 1) / 2;
++
++            #pragma omp parallel for num_threads(threads)
++            for (int y = 0; y < size.height; y++)
++            {
++                const uchar* r_src = src_base + y * sstep;
++                uchar* r_dst = dst_base + y * dstep;
++
++                for (int i = 0, j = end; i < width; i += 3, j -= 3)
++                {
++                    ushort t0, t1;
++                    uchar t2, t3;
++
++                    t0 = *((ushort*)(r_src + i));
++                    t2 = *((uchar*)(r_src + i + 2));
++                    
++                    t1 = *((ushort*)(r_src + j - 3));
++                    t3 = *((uchar*)(r_src + j - 1));
++
++                    *((ushort*)(r_dst + j - 3)) = t0;
++                    *((uchar*)(r_dst + j - 1)) = t2;
++                    
++                    *((ushort*)(r_dst + i)) = t1;
++                    *((uchar*)(r_dst + i + 2)) = t3;
++                }
++            }
++        }
++        else
++        {
++            flipHoriz_double<ushort,uchar>(src, sstep, dst, dstep, size, esz);
++        }
+     }
++    else if (esz == 12) { flipHoriz_double<uint64_t,uint>(src, sstep, dst, dstep, size, esz); }
++    else if (esz == 6)  { flipHoriz_double<uint,ushort>(src, sstep, dst, dstep, size, esz); }
+ #endif
++    else if (esz == 8) { flipHoriz_single<v_uint64x2>(src, sstep, dst, dstep, size, esz); }
++
+     else
+ #endif // CV_SIMD128
+     {
+-        int i, j, limit = (int)(((size.width + 1)/2)*esz);
++        int limit = (int)(((size.width + 1)/2)*esz);
+         AutoBuffer<int> _tab(size.width*esz);
+         int* tab = _tab.data();
+ 
+-        for( i = 0; i < size.width; i++ )
++        for( int i = 0; i < size.width; i++ )
+             for( size_t k = 0; k < esz; k++ )
+                 tab[i*esz + k] = (int)((size.width - i - 1)*esz + k);
+ 
+-        for( ; size.height--; src += sstep, dst += dstep )
+-        {
+-            for( i = 0; i < limit; i++ )
++        if (use_parallel) {
++            #pragma omp parallel for num_threads(threads)
++            for( int y = 0; y < size.height; y++ )
+             {
+-                j = tab[i];
+-                uchar t0 = src[i], t1 = src[j];
+-                dst[i] = t1; dst[j] = t0;
++                const uchar* r_src = src_base + y * sstep;
++                uchar* r_dst = dst_base + y * dstep;
++                for( int i = 0; i < limit; i++ )
++                {
++                    int j = tab[i];
++                    uchar t0 = r_src[i], t1 = r_src[j];
++                    r_dst[i] = t1; r_dst[j] = t0;
++                }
++            }
++        } else {
++             for( ; size.height--; src += sstep, dst += dstep )
++            {
++                for( int i = 0; i < limit; i++ )
++                {
++                    int j = tab[i];
++                    uchar t0 = src[i], t1 = src[j];
++                    dst[i] = t1; dst[j] = t0;
++                }
+             }
+         }
+     }
+ }
+ 
+ static void
+-flipVert( const uchar* src0, size_t sstep, uchar* dst0, size_t dstep, Size size, size_t esz )
++flipVert( const uchar* src0_base, size_t sstep, uchar* dst0_base, size_t dstep, Size size, size_t esz )
+ {
+-    const uchar* src1 = src0 + (size.height - 1)*sstep;
+-    uchar* dst1 = dst0 + (size.height - 1)*dstep;
+     size.width *= (int)esz;
+ 
+-    for( int y = 0; y < (size.height + 1)/2; y++, src0 += sstep, src1 -= sstep,
+-                                                  dst0 += dstep, dst1 -= dstep )
+-    {
++    int half_height = (size.height + 1) / 2;
++
++    int threads = getenvT("KCV_ROTATE_T", 16);
++    #pragma omp parallel for num_threads(threads)
++    for( int y = 0; y < half_height; y++ )
++    {
++        const uchar* src0 = src0_base + y * sstep;
++        const uchar* src1 = src0_base + (size.height - 1 - y) * sstep;
++        
++        uchar* dst0 = dst0_base + y * dstep;
++        uchar* dst1 = dst0_base + (size.height - 1 - y) * dstep;
++
+         int i = 0;
+ #if (CV_SIMD || CV_SIMD_SCALABLE)
+ #if CV_STRONG_ALIGNMENT
+diff -Naur opencv-4.10.0/modules/core/src/mean.dispatch.cpp opencv/modules/core/src/mean.dispatch.cpp
+--- opencv-4.10.0/modules/core/src/mean.dispatch.cpp	2024-06-02 19:41:07.000000000 +0800
++++ opencv/modules/core/src/mean.dispatch.cpp	2026-02-09 14:42:38.843195583 +0800
+@@ -122,8 +122,164 @@
+ }
+ #endif
+ 
++#include <omp.h>
++Scalar kcv_mean(InputArray _src, InputArray _mask)
++{
++    Mat img = _src.getMat();
++    Mat mask = _mask.getMat();
++
++    CV_Assert(img.type() == CV_8UC3);
++    CV_Assert(img.isContinuous());
++
++    bool has_mask = !mask.empty();
++    if (has_mask)
++    {
++        CV_Assert(mask.type() == CV_8UC1);
++        CV_Assert(mask.size() == img.size());
++        CV_Assert(mask.isContinuous());
++    }
++
++    const uint8_t *data = img.ptr<uint8_t>();
++    const uint8_t *mask_data = has_mask ? mask.ptr<uint8_t>() : nullptr;
++
++    size_t total_pixels = img.total();
++
++    uint64_t global_total_c0 = 0;
++    uint64_t global_total_c1 = 0;
++    uint64_t global_total_c2 = 0;
++    uint64_t global_valid_pixels = 0;
++
++    auto hsum_u32 = [](uint32x4_t x) -> uint64_t
++    {
++        return vaddlvq_u32(x);
++    };
++    int threads = getenvT("KCV_MEAN_T", 16);
++    #pragma omp parallel num_threads(threads)
++    {
++        int nthreads = omp_get_num_threads();
++        int tid = omp_get_thread_num();
++
++        size_t chunk_size = total_pixels / nthreads;
++        size_t start = tid * chunk_size;
++        size_t end = (tid == nthreads - 1) ? total_pixels : start + chunk_size;
++
++        uint32x4_t sum_c0 = vdupq_n_u32(0);
++        uint32x4_t sum_c1 = vdupq_n_u32(0);
++        uint32x4_t sum_c2 = vdupq_n_u32(0);
++        uint32x4_t vec_valid_count = vdupq_n_u32(0);
++
++        size_t i = start;
++        size_t simd_loop_end = start + ((end - start) / 16) * 16;
++
++        if (!has_mask)
++        {
++            for (; i < simd_loop_end; i += 16)
++            {
++                uint8x16x3_t pixels = vld3q_u8(data + i * 3);
++
++                uint16x8_t c0_low = vmovl_u8(vget_low_u8(pixels.val[0]));
++                uint16x8_t c0_high = vmovl_u8(vget_high_u8(pixels.val[0]));
++                sum_c0 = vaddq_u32(sum_c0, vaddl_u16(vget_low_u16(c0_low), vget_high_u16(c0_low)));
++                sum_c0 = vaddq_u32(sum_c0, vaddl_u16(vget_low_u16(c0_high), vget_high_u16(c0_high)));
++
++                uint16x8_t c1_low = vmovl_u8(vget_low_u8(pixels.val[1]));
++                uint16x8_t c1_high = vmovl_u8(vget_high_u8(pixels.val[1]));
++                sum_c1 = vaddq_u32(sum_c1, vaddl_u16(vget_low_u16(c1_low), vget_high_u16(c1_low)));
++                sum_c1 = vaddq_u32(sum_c1, vaddl_u16(vget_low_u16(c1_high), vget_high_u16(c1_high)));
++
++                uint16x8_t c2_low = vmovl_u8(vget_low_u8(pixels.val[2]));
++                uint16x8_t c2_high = vmovl_u8(vget_high_u8(pixels.val[2]));
++                sum_c2 = vaddq_u32(sum_c2, vaddl_u16(vget_low_u16(c2_low), vget_high_u16(c2_low)));
++                sum_c2 = vaddq_u32(sum_c2, vaddl_u16(vget_low_u16(c2_high), vget_high_u16(c2_high)));
++            }
++        }
++        else
++        {
++            const uint8x16_t zeros = vdupq_n_u8(0);
++            const uint8x16_t ones = vdupq_n_u8(1);
++
++            for (; i < simd_loop_end; i += 16)
++            {
++                uint8x16_t m_val = vld1q_u8(mask_data + i);
++                uint8x16_t mask_bool = vcgtq_u8(m_val, zeros);
++
++                uint8x16_t count_contrib = vandq_u8(mask_bool, ones);
++                uint16x8_t cnt_low = vmovl_u8(vget_low_u8(count_contrib));
++                uint16x8_t cnt_high = vmovl_u8(vget_high_u8(count_contrib));
++                vec_valid_count = vaddq_u32(vec_valid_count, vaddl_u16(vget_low_u16(cnt_low), vget_high_u16(cnt_low)));
++                vec_valid_count = vaddq_u32(vec_valid_count, vaddl_u16(vget_low_u16(cnt_high), vget_high_u16(cnt_high)));
++
++                uint8x16x3_t pixels = vld3q_u8(data + i * 3);
++
++                pixels.val[0] = vandq_u8(pixels.val[0], mask_bool);
++                pixels.val[1] = vandq_u8(pixels.val[1], mask_bool);
++                pixels.val[2] = vandq_u8(pixels.val[2], mask_bool);
++
++                uint16x8_t c0_low = vmovl_u8(vget_low_u8(pixels.val[0]));
++                uint16x8_t c0_high = vmovl_u8(vget_high_u8(pixels.val[0]));
++                sum_c0 = vaddq_u32(sum_c0, vaddl_u16(vget_low_u16(c0_low), vget_high_u16(c0_low)));
++                sum_c0 = vaddq_u32(sum_c0, vaddl_u16(vget_low_u16(c0_high), vget_high_u16(c0_high)));
++
++                uint16x8_t c1_low = vmovl_u8(vget_low_u8(pixels.val[1]));
++                uint16x8_t c1_high = vmovl_u8(vget_high_u8(pixels.val[1]));
++                sum_c1 = vaddq_u32(sum_c1, vaddl_u16(vget_low_u16(c1_low), vget_high_u16(c1_low)));
++                sum_c1 = vaddq_u32(sum_c1, vaddl_u16(vget_low_u16(c1_high), vget_high_u16(c1_high)));
++
++                uint16x8_t c2_low = vmovl_u8(vget_low_u8(pixels.val[2]));
++                uint16x8_t c2_high = vmovl_u8(vget_high_u8(pixels.val[2]));
++                sum_c2 = vaddq_u32(sum_c2, vaddl_u16(vget_low_u16(c2_low), vget_high_u16(c2_low)));
++                sum_c2 = vaddq_u32(sum_c2, vaddl_u16(vget_low_u16(c2_high), vget_high_u16(c2_high)));
++            }
++        }
++
++        uint64_t thread_c0 = hsum_u32(sum_c0);
++        uint64_t thread_c1 = hsum_u32(sum_c1);
++        uint64_t thread_c2 = hsum_u32(sum_c2);
++
++        uint64_t thread_valid_count = 0;
++        if (!has_mask) {
++            thread_valid_count = (i - start);
++        } else {
++            thread_valid_count = hsum_u32(vec_valid_count);
++        }
++
++        for (; i < end; ++i)
++        {
++            if (has_mask && mask_data[i] == 0) continue;
++
++            thread_c0 += data[i * 3 + 0];
++            thread_c1 += data[i * 3 + 1];
++            thread_c2 += data[i * 3 + 2];
++            thread_valid_count++;
++        }
++
++        #pragma omp atomic
++        global_total_c0 += thread_c0;
++
++        #pragma omp atomic
++        global_total_c1 += thread_c1;
++
++        #pragma omp atomic
++        global_total_c2 += thread_c2;
++
++        #pragma omp atomic
++        global_valid_pixels += thread_valid_count;
++    }
++
++    if (global_valid_pixels == 0) return cv::Scalar(0, 0, 0);
++
++    double N = static_cast<double>(global_valid_pixels);
++    double mean_c0 = global_total_c0 / N;
++    double mean_c1 = global_total_c1 / N;
++    double mean_c2 = global_total_c2 / N;
++
++    return cv::Scalar(mean_c0, mean_c1, mean_c2);
++}
+ Scalar mean(InputArray _src, InputArray _mask)
+ {
++    if(_src.depth() == CV_8U || _src.channels() <= 3){
++        return  kcv_mean(_src, _mask);
++    }
+     CV_INSTRUMENT_REGION();
+ 
+     Mat src = _src.getMat(), mask = _mask.getMat();
+diff -Naur opencv-4.10.0/modules/core/src/minmax.cpp opencv/modules/core/src/minmax.cpp
+--- opencv-4.10.0/modules/core/src/minmax.cpp	2024-06-02 19:41:07.000000000 +0800
++++ opencv/modules/core/src/minmax.cpp	2026-02-09 14:42:38.843195583 +0800
+@@ -206,77 +206,190 @@
+ }
+ #endif
+ 
+-static void minMaxIdx_8u(const uchar* src, const uchar* mask, int* minval, int* maxval,
+-                         size_t* minidx, size_t* maxidx, int len, size_t startidx )
++static inline int neonFirstTrue_u8(uint8x16_t v)
+ {
+-#if CV_SIMD128
+-    if ( len >= VTraits<v_uint8x16>::vlanes() )
++    uint8x16_t nz = vmvnq_u8(vceqq_u8(v, vdupq_n_u8(0)));
++    uint64x2_t pair = vreinterpretq_u64_u8(nz);
++
++    if (vgetq_lane_u64(pair, 0))
++        return __builtin_ctzll(vgetq_lane_u64(pair, 0)) >> 3;
++    if (vgetq_lane_u64(pair, 1))
++        return (__builtin_ctzll(vgetq_lane_u64(pair, 1)) >> 3) + 8;
++
++    return -1;
++}
++
++static void minMaxIdx_8u_nomask_neon(const uchar* src,
++                                    int* minval, int* maxval,
++                                    size_t* minidx, size_t* maxidx,
++                                    int len, size_t startidx)
++{
++    int minVal = *minval;
++    int maxVal = *maxval;
++    size_t minIdx = *minidx;
++    size_t maxIdx = *maxidx;
++
++    uint8x16_t vmin_all = vdupq_n_u8((uint8_t)minVal);
++    uint8x16_t vmax_all = vdupq_n_u8((uint8_t)maxVal);
++
++    uint8_t tmp[16];
++    int i = 0;
++    for (; i <= len - 16; i += 16)
+     {
+-        int j, len0;
+-        int minVal, maxVal;
+-        size_t minIdx, maxIdx;
++        uint8x16_t v = vld1q_u8(src + i);
++
++        // minvalue
++        uint8x16_t blockMinVec = vminq_u8(v, vmin_all);
++        uint8_t blockMin = vminvq_u8(blockMinVec);
+ 
+-        minMaxIdx_init( src, mask, minval, maxval, minidx, maxidx, minVal, maxVal, minIdx, maxIdx,
+-                        (int)0, (int)UCHAR_MAX, VTraits<v_uint8x16>::vlanes(), len, startidx, j, len0 );
++        if (blockMin < minVal)
++        {
++            uint8x16_t eq = vceqq_u8(v, vdupq_n_u8(blockMin));
++            int lane = neonFirstTrue_u8(eq);
++            vst1q_u8(tmp, v);
++
++            minVal = blockMin;
++            minIdx = startidx + i + lane;
++            vmin_all = vdupq_n_u8((uint8_t)minVal);
++        }
++
++        // maxvalue
++        uint8x16_t blockMaxVec = vmaxq_u8(v, vmax_all);
++        uint8_t blockMax = vmaxvq_u8(blockMaxVec);
+ 
+-        if ( j <= len0 - VTraits<v_uint8x16>::vlanes() )
++        if (blockMax > maxVal)
+         {
+-            v_uint8x16 inc = v_setall_u8((uchar)VTraits<v_uint8x16>::vlanes());
+-            v_uint8x16 none = v_reinterpret_as_u8(v_setall_s8(-1));
+-            v_uint8x16 idxStart(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
++            uint8x16_t eq = vceqq_u8(v, vdupq_n_u8(blockMax));
++            int lane = neonFirstTrue_u8(eq);
++            vst1q_u8(tmp, v);
++
++            maxVal = blockMax;
++            maxIdx = startidx + i + lane;
++            vmax_all = vdupq_n_u8((uint8_t)maxVal);
++        }
++    }
+ 
+-            do
+-            {
+-                v_uint8x16 valMin = v_setall_u8((uchar)minVal), valMax = v_setall_u8((uchar)maxVal);
+-                v_uint8x16 idx = idxStart, idxMin = none, idxMax = none;
++    for (; i < len; i++)
++    {
++        uchar v = src[i];
++        if (v < minVal)
++        {
++            minVal = v;
++            minIdx = startidx + i;
++        }
++        if (v > maxVal)
++        {
++            maxVal = v;
++            maxIdx = startidx + i;
++        }
++    }
+ 
+-                int k = j;
+-                size_t delta = startidx + j;
++    *minval = minVal;
++    *maxval = maxVal;
++    *minidx = minIdx;
++    *maxidx = maxIdx;
++    return;
++}
++
++static void minMaxIdx_8u_mask_neon(const uchar* src, const uchar* mask,
++                                  int* minval, int* maxval,
++                                  size_t* minidx, size_t* maxidx,
++                                  int len, size_t startidx)
++{
++    int minVal = *minval;
++    int maxVal = *maxval;
++    size_t minIdx = *minidx;
++    size_t maxIdx = *maxidx;
+ 
+-                if ( !mask )
+-                {
+-                    for( ; k < std::min(len0, j + 15 * VTraits<v_uint8x16>::vlanes()); k += VTraits<v_uint8x16>::vlanes() )
+-                    {
+-                        v_uint8x16 data = v_load(src + k);
+-                        v_uint8x16 cmpMin = (v_lt(data, valMin));
+-                        v_uint8x16 cmpMax = (v_gt(data, valMax));
+-                        idxMin = v_select(cmpMin, idx, idxMin);
+-                        idxMax = v_select(cmpMax, idx, idxMax);
+-                        valMin = v_min(data, valMin);
+-                        valMax = v_max(data, valMax);
+-                        idx = v_add(idx, inc);
+-                    }
+-                }
+-                else
+-                {
+-                    for( ; k < std::min(len0, j + 15 * VTraits<v_uint8x16>::vlanes()); k += VTraits<v_uint8x16>::vlanes() )
+-                    {
+-                        v_uint8x16 data = v_load(src + k);
+-                        v_uint8x16 maskVal = v_ne(v_load(mask + k), v_setzero_u8());
+-                        v_uint8x16 cmpMin = v_and(v_lt(data, valMin), maskVal);
+-                        v_uint8x16 cmpMax = v_and(v_gt(data, valMax), maskVal);
+-                        idxMin = v_select(cmpMin, idx, idxMin);
+-                        idxMax = v_select(cmpMax, idx, idxMax);
+-                        valMin = v_select(cmpMin, data, valMin);
+-                        valMax = v_select(cmpMax, data, valMax);
+-                        idx = v_add(idx, inc);
+-                    }
+-                }
++    uint8x16_t vmin_all = vdupq_n_u8((uint8_t)minVal);
++    uint8x16_t vmax_all = vdupq_n_u8((uint8_t)maxVal);
++
++    const uint8x16_t v255  = vdupq_n_u8(255);
++    const uint8x16_t vzero = vdupq_n_u8(0);
++
++    int i = 0;
++    for (; i <= len - 16; i += 16)
++    {
++        uint8x16_t v = vld1q_u8(src + i);
++        uint8x16_t m = vld1q_u8(mask + i);
+ 
+-                j = k;
++        uint8x16_t valid = vcgtq_u8(m, vzero);
+ 
+-                minMaxIdx_reduce_u8( valMin, valMax, idxMin, idxMax, none, minVal, maxVal,
+-                                     minIdx, maxIdx, delta );
++        // masked value: invalid -> 255
++        uint8x16_t v_min_masked = vbslq_u8(valid, v, v255);
++        // block min compared with current min
++        uint8x16_t blockMinVec = vminq_u8(v_min_masked, vmin_all);
++        uint8_t blockMin = vminvq_u8(blockMinVec);
++
++        if (blockMin < minVal)
++        {
++            uint8x16_t eq = vandq_u8(valid, vceqq_u8(v, vdupq_n_u8(blockMin)));
++            int lane = neonFirstTrue_u8(eq);
++
++            if (lane >= 0)
++            {
++                minVal = blockMin;
++                minIdx = startidx + i + lane;
++                vmin_all = vdupq_n_u8((uint8_t)minVal);
+             }
+-            while ( j < len0 );
+         }
+ 
+-        minMaxIdx_finish( src, mask, minval, maxval, minidx, maxidx, minVal, maxVal,
+-                          minIdx, maxIdx, len, startidx, j );
++        // masked value: invalid -> 0
++        uint8x16_t v_max_masked = vbslq_u8(valid, v, vzero);
++
++        uint8x16_t blockMaxVec = vmaxq_u8(v_max_masked, vmax_all);
++        uint8_t blockMax = vmaxvq_u8(blockMaxVec);
++
++        if (blockMax > maxVal)
++        {
++            uint8x16_t eq = vandq_u8(valid, vceqq_u8(v, vdupq_n_u8(blockMax)));
++            int lane = neonFirstTrue_u8(eq);
++
++            if (lane >= 0)
++            {
++                maxVal = blockMax;
++                maxIdx = startidx + i + lane;
++                vmax_all = vdupq_n_u8((uint8_t)maxVal);
++            }
++        }
+     }
+-    else
++
++    for (; i < len; i++)
+     {
+-        minMaxIdx_(src, mask, minval, maxval, minidx, maxidx, len, startidx);
++        if (!mask[i])
++            continue;
++
++        uchar v = src[i];
++        if (v < minVal)
++        {
++            minVal = v;
++            minIdx = startidx + i;
++        }
++        if (v > maxVal)
++        {
++            maxVal = v;
++            maxIdx = startidx + i;
++        }
++    }
++
++    *minval = minVal;
++    *maxval = maxVal;
++    *minidx = minIdx;
++    *maxidx = maxIdx;
++    return;
++}
++
++static void minMaxIdx_8u(const uchar* src, const uchar* mask,
++                         int* minval, int* maxval,
++                         size_t* minidx, size_t* maxidx,
++                         int len, size_t startidx)
++{
++#if defined(__ARM_NEON)
++    if (!mask) {
++        minMaxIdx_8u_nomask_neon(src, minval, maxval, minidx, maxidx, len, startidx);
++    }
++    else {
++        minMaxIdx_8u_mask_neon(src, mask, minval, maxval, minidx, maxidx, len, startidx);
+     }
+ #else
+     minMaxIdx_(src, mask, minval, maxval, minidx, maxidx, len, startidx);
+diff -Naur opencv-4.10.0/modules/core/src/norm.cpp opencv/modules/core/src/norm.cpp
+--- opencv-4.10.0/modules/core/src/norm.cpp	2024-06-02 19:41:07.000000000 +0800
++++ opencv/modules/core/src/norm.cpp	2026-02-09 14:42:38.843195583 +0800
+@@ -6,6 +6,7 @@
+ #include "precomp.hpp"
+ #include "opencl_kernels_core.hpp"
+ #include "stat.hpp"
++#include <omp.h>
+ 
+ /****************************************************************************************\
+ *                                         norm                                           *
+@@ -600,8 +601,279 @@
+ }  // ipp_norm()
+ #endif  // HAVE_IPP
+ 
++inline uint64x2_t accumulate_square_u8(uint64x2_t acc_u64, uint8x16_t vec_u8)
++{
++    uint16x8_t low_u16 = vmovl_u8(vget_low_u8(vec_u8));
++    uint16x8_t high_u16 = vmovl_u8(vget_high_u8(vec_u8));
++
++    uint32x4_t sq_low_u32 = vmull_u16(vget_low_u16(low_u16), vget_low_u16(low_u16));
++    uint32x4_t sq_low_u32_2 = vmull_u16(vget_high_u16(low_u16), vget_high_u16(low_u16));
++
++    uint32x4_t sq_high_u32 = vmull_u16(vget_low_u16(high_u16), vget_low_u16(high_u16));
++    uint32x4_t sq_high_u32_2 = vmull_u16(vget_high_u16(high_u16), vget_high_u16(high_u16));
++
++    acc_u64 = vpadalq_u32(acc_u64, sq_low_u32);
++    acc_u64 = vpadalq_u32(acc_u64, sq_low_u32_2);
++    acc_u64 = vpadalq_u32(acc_u64, sq_high_u32);
++    acc_u64 = vpadalq_u32(acc_u64, sq_high_u32_2);
++
++    return acc_u64;
++}
++
++static inline uint32x4_t accumulate_sum_u8(uint32x4_t sum32, uint8x16_t data) {
++    uint16x8_t sum16 = vpaddlq_u8(data);
++    return vpadalq_u16(sum32, sum16);
++}
++
++static double kcv_norm_L1(cv::InputArray _src, cv::InputArray _mask)
++{
++    cv::Mat src = _src.getMat();
++    cv::Mat mask = _mask.getMat();
++
++    bool has_mask = !mask.empty();
++
++    const uint8_t *src_data = src.ptr<uint8_t>();
++    const uint8_t *mask_data = has_mask ? mask.ptr<uint8_t>() : nullptr;
++
++    const int cn = src.channels();
++    const size_t total_pixels = src.total();
++    uint64_t global_sum = 0;
++
++    int threads = getenvT("KCV_NORM_T", 16);
++
++#pragma omp parallel num_threads(threads)
++    {
++        int nthreads = omp_get_num_threads();
++        int tid = omp_get_thread_num();
++
++        uint32x4_t vec_sum = vdupq_n_u32(0);
++        uint64_t scalar_sum = 0;
++
++        if (!has_mask)
++        {
++            size_t total_bytes = total_pixels * cn;
++            size_t chunk_size = total_bytes / nthreads;
++            size_t start = tid * chunk_size;
++            size_t end = (tid == nthreads - 1) ? total_bytes : start + chunk_size;
++
++            size_t i = start;
++            size_t simd_end = start + ((end - start) / 16) * 16;
++
++            for (; i < simd_end; i += 16)
++            {
++                uint8x16_t v_data = vld1q_u8(src_data + i);
++                vec_sum = accumulate_sum_u8(vec_sum, v_data);
++            }
++
++            scalar_sum += vaddvq_u32(vec_sum);
++            for (; i < end; ++i)
++            {
++                scalar_sum += src_data[i];
++            }
++        }
++        else
++        {
++            size_t chunk_size = total_pixels / nthreads;
++            size_t start = tid * chunk_size;
++            size_t end = (tid == nthreads - 1) ? total_pixels : start + chunk_size;
++
++            size_t i = start;
++            size_t simd_end = start + ((end - start) / 16) * 16;
++            const uint8x16_t v_zero = vdupq_n_u8(0);
++
++            if (cn == 1)
++            {
++                for (; i < simd_end; i += 16)
++                {
++                    uint8x16_t m_val = vld1q_u8(mask_data + i);
++                    uint8x16_t mask_bool = vcgtq_u8(m_val, v_zero);
++                    uint8x16_t v_data = vld1q_u8(src_data + i);
++                    v_data = vandq_u8(v_data, mask_bool);
++                    vec_sum = accumulate_sum_u8(vec_sum, v_data);
++                }
++            }
++            else if (cn == 3)
++            {
++                for (; i < simd_end; i += 16)
++                {
++                    uint8x16_t m_val = vld1q_u8(mask_data + i);
++                    uint8x16_t mask_bool = vcgtq_u8(m_val, v_zero);
++
++                    uint8x16x3_t v_data3 = vld3q_u8(src_data + i * 3);
++                    v_data3.val[0] = vandq_u8(v_data3.val[0], mask_bool);
++                    v_data3.val[1] = vandq_u8(v_data3.val[1], mask_bool);
++                    v_data3.val[2] = vandq_u8(v_data3.val[2], mask_bool);
++
++                    vec_sum = accumulate_sum_u8(vec_sum, v_data3.val[0]);
++                    vec_sum = accumulate_sum_u8(vec_sum, v_data3.val[1]);
++                    vec_sum = accumulate_sum_u8(vec_sum, v_data3.val[2]);
++                }
++            }
++
++            scalar_sum += vaddvq_u32(vec_sum);
++
++            for (; i < end; ++i)
++            {
++                if (mask_data[i] > 0)
++                {
++                    for (int c = 0; c < cn; ++c)
++                        scalar_sum += src_data[i * cn + c];
++                }
++            }
++        }
++
++#pragma omp atomic
++        global_sum += scalar_sum;
++    }
++
++    return static_cast<double>(global_sum);
++}
++static double kcv_norm(InputArray _src, int normType, InputArray _mask)
++{
++
++    Mat src = _src.getMat();
++    Mat mask = _mask.getMat();
++
++    if (src.empty())
++        return 0.0;
++
++    CV_Assert(src.depth() == CV_8U);
++    CV_Assert(src.isContinuous());
++
++    bool has_mask = !mask.empty();
++    if (has_mask)
++    {
++        CV_Assert(mask.type() == CV_8UC1);
++        CV_Assert(mask.size() == src.size());
++        CV_Assert(mask.isContinuous());
++    }
++
++    if(normType == NORM_L1){
++        return kcv_norm_L1(_src, _mask);
++    }
++
++    const uint8_t *src_data = src.ptr<uint8_t>();
++    const uint8_t *mask_data = has_mask ? mask.ptr<uint8_t>() : nullptr;
++
++    int cn = src.channels();
++    size_t total_pixels = src.total();
++
++    uint64_t global_sq_sum = 0;
++
++    auto hsum_u64 = [](uint64x2_t x) -> uint64_t
++    {
++        return vaddvq_u64(x);
++    };
++
++    int threads = getenvT("KCV_NORM_T", 16);
++#pragma omp parallel num_threads(threads)
++    {
++        int nthreads = omp_get_num_threads();
++        int tid = omp_get_thread_num();
++
++        uint64x2_t vec_sq_sum = vdupq_n_u64(0);
++        uint64_t scalar_sq_sum = 0;
++
++        if (!has_mask)
++        {
++            size_t total_bytes = total_pixels * cn;
++
++            size_t chunk_size = total_bytes / nthreads;
++            size_t start = tid * chunk_size;
++            size_t end = (tid == nthreads - 1) ? total_bytes : start + chunk_size;
++
++            size_t i = start;
++            size_t simd_end = start + ((end - start) / 16) * 16;
++
++            for (; i < simd_end; i += 16)
++            {
++                uint8x16_t v_data = vld1q_u8(src_data + i);
++                vec_sq_sum = accumulate_square_u8(vec_sq_sum, v_data);
++            }
++
++            scalar_sq_sum += hsum_u64(vec_sq_sum);
++            for (; i < end; ++i)
++            {
++                uint64_t val = src_data[i];
++                scalar_sq_sum += val * val;
++            }
++        }
++        else
++        {
++            size_t chunk_size = total_pixels / nthreads;
++            size_t start = tid * chunk_size;
++            size_t end = (tid == nthreads - 1) ? total_pixels : start + chunk_size;
++
++            size_t i = start;
++            size_t simd_end = start + ((end - start) / 16) * 16;
++
++            const uint8x16_t zeros = vdupq_n_u8(0);
++
++            if (cn == 1)
++            {
++                for (; i < simd_end; i += 16)
++                {
++                    uint8x16_t m_val = vld1q_u8(mask_data + i);
++                    uint8x16_t mask_bool = vcgtq_u8(m_val, zeros);
++
++                    uint8x16_t v_data = vld1q_u8(src_data + i);
++
++                    v_data = vandq_u8(v_data, mask_bool);
++
++                    vec_sq_sum = accumulate_square_u8(vec_sq_sum, v_data);
++                }
++            }
++            else if (cn == 3)
++            {
++                for (; i < simd_end; i += 16)
++                {
++                    uint8x16_t m_val = vld1q_u8(mask_data + i);
++                    uint8x16_t mask_bool = vcgtq_u8(m_val, zeros);
++
++                    uint8x16x3_t pixels = vld3q_u8(src_data + i * 3);
++
++                    pixels.val[0] = vandq_u8(pixels.val[0], mask_bool);
++                    pixels.val[1] = vandq_u8(pixels.val[1], mask_bool);
++                    pixels.val[2] = vandq_u8(pixels.val[2], mask_bool);
++
++                    vec_sq_sum = accumulate_square_u8(vec_sq_sum, pixels.val[0]);
++                    vec_sq_sum = accumulate_square_u8(vec_sq_sum, pixels.val[1]);
++                    vec_sq_sum = accumulate_square_u8(vec_sq_sum, pixels.val[2]);
++                }
++            }
++
++            scalar_sq_sum += hsum_u64(vec_sq_sum);
++
++            for (; i < end; ++i)
++            {
++                if (mask_data[i] == 0)
++                    continue;
++
++                for (int c = 0; c < cn; ++c)
++                {
++                    uint64_t val = src_data[i * cn + c];
++                    scalar_sq_sum += val * val;
++                }
++            }
++        }
++
++#pragma omp atomic
++        global_sq_sum += scalar_sq_sum;
++    }
++    if( normType == NORM_L2 ){
++        return std::sqrt(static_cast<double>(global_sq_sum));
++    }
++    else if( normType == NORM_L2SQR ){
++        return static_cast<double>(global_sq_sum);
++    }
++    return std::sqrt(static_cast<double>(global_sq_sum));
++}
++
+ double norm( InputArray _src, int normType, InputArray _mask )
+ {
++    if(_src.depth() == CV_8U && (normType == NORM_L2 || normType == NORM_L2SQR || normType == NORM_L1)){
++        return kcv_norm(_src, normType, _mask);
++    }
+     CV_INSTRUMENT_REGION();
+ 
+     normType &= NORM_TYPE_MASK;
+@@ -1076,7 +1348,11 @@
+ 
+     CV_CheckTypeEQ(_src1.type(), _src2.type(), "Input type mismatch");
+     CV_Assert(_src1.sameSize(_src2));
+-
++    if(_src1.depth() == CV_8U && _src2.depth() == CV_8U && normType == NORM_L2){
++        cv::Mat diff;
++        cv::absdiff(_src1, _src2, diff);
++        return kcv_norm(diff, normType, _mask);
++    }
+ #if defined HAVE_OPENCL || defined HAVE_IPP
+     double _result = 0;
+ #endif
+diff -Naur opencv-4.10.0/modules/core/src/parallel.cpp opencv/modules/core/src/parallel.cpp
+--- opencv-4.10.0/modules/core/src/parallel.cpp	2024-06-02 19:41:07.000000000 +0800
++++ opencv/modules/core/src/parallel.cpp	2026-02-09 14:42:38.847195860 +0800
+@@ -77,7 +77,6 @@
+ #endif
+ 
+ #ifdef _OPENMP
+-    #define HAVE_OPENMP
+ #endif
+ 
+ #ifdef __APPLE__
+@@ -495,6 +494,22 @@
+ #endif
+ 
+ } // namespace anon
++int getenvT(std::string key, int default_value)
++{
++    const char *value = std::getenv(key.c_str());
++    if (value)
++    {
++        try
++        {
++            return std::stoi(value);
++        }
++        catch (...)
++        {
++            return default_value;
++        }
++    }
++    return default_value;
++}
+ 
+ /* ================================   parallel_for_  ================================ */
+ 
