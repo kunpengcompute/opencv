@@ -434,6 +434,7 @@ void gemm(InputArray matA, InputArray matB, double alpha,
 /****************************************************************************************\
 *                                        Transform                                       *
 \****************************************************************************************/
+#define CV_OPT_TOTAL_SIZE_THRESHOLD 10000
 
 static TransformFunc getTransformFunc(int depth)
 {
@@ -522,10 +523,26 @@ void transform(InputArray _src, OutputArray _dst, InputArray _mtx)
     const Mat* arrays[] = {&src, &dst, 0};
     uchar* ptrs[2] = {};
     NAryMatIterator it(arrays, ptrs);
-    size_t i, total = it.size;
 
-    for( i = 0; i < it.nplanes; i++, ++it )
-        func( ptrs[0], ptrs[1], (uchar*)mbuf, (int)total, scn, dcn );
+    int nplanes = it.nplanes;
+    int planesize = it.size;
+    long total_pixels = (long)nplanes * planesize;
+    if (nplanes > 1 && total_pixels >= CV_OPT_TOTAL_SIZE_THRESHOLD) {
+        std::vector<uchar*> src_ptrs(nplanes);
+        std::vector<uchar*> dst_ptrs(nplanes);
+        for (int i = 0; i < nplanes; i++, ++it) {
+            src_ptrs[i] = it.ptrs[0];
+            dst_ptrs[i] = it.ptrs[1];
+        }
+        #pragma omp parallel for num_threads(4)
+        for (int i = 0; i < nplanes; i++) {
+            func(src_ptrs[i], dst_ptrs[i], (uchar*)mbuf, (int)planesize, scn, dcn);
+        }
+    } else {
+        for (int i = 0; i < nplanes; i++, ++it) {
+            func(ptrs[0], ptrs[1], (uchar*)mbuf, (int)planesize, scn, dcn);
+        }
+    }
 }
 
 

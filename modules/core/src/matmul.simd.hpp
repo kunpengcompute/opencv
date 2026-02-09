@@ -1377,6 +1377,7 @@ void gemm64fc(const double* src1, size_t src1_step, const double* src2, size_t s
 /****************************************************************************************\
 *                                        Transform                                       *
 \****************************************************************************************/
+#define CV_OPT_PLANE_SIZE_THRESHOLD 4000
 
 template<typename T, typename WT> static void
 transform_( const T* src, T* dst, const WT* m, int len, int scn, int dcn )
@@ -1439,10 +1440,145 @@ transform_( const T* src, T* dst, const WT* m, int len, int scn, int dcn )
     }
 }
 
+static inline int32x4_t vmlal_low_n_s16(int32x4_t res, int16x8_t v, int16_t c)
+{
+    asm(
+        "smlal %0.4s, %1.4h, %2.h[0]"
+        : "+w"(res)
+        : "w"(v), "w"(c)
+    );
+    return res;
+}
+
+static inline uint16x8_t vmovl_low_u8(uint8x16_t v)
+{
+    uint16x8_t res;
+    asm(
+        "ushll %0.8h, %1.8b, #0"
+        : "=w"(res)
+        : "w"(v)
+    );
+    return res;
+}
+
+static inline uint32x4_t vmovl_low_u16(uint16x8_t v)
+{
+    uint32x4_t res;
+    asm(
+        "ushll %0.4s, %1.4h, #0"
+        : "=w"(res)
+        : "w"(v)
+    );
+    return res;
+
+}
+
 static void
 transform_8u( const uchar* src, uchar* dst, const float* m, int len, int scn, int dcn )
 {
-#if (CV_SIMD || CV_SIMD_SCALABLE)
+#if defined(__aarch64__) && (defined(CV_NEON))
+    if (len > CV_OPT_PLANE_SIZE_THRESHOLD) { 
+        const int BITS = 10, SCALE = 1 << BITS;
+        const float MAX_M = (float)(1 << (15 - BITS));
+
+        if( scn == 3 && dcn == 3 &&
+            std::abs(m[0]) < MAX_M && std::abs(m[1]) < MAX_M && std::abs(m[2]) < MAX_M*256 && std::abs(m[3]) < MAX_M*256 &&
+            std::abs(m[4]) < MAX_M && std::abs(m[5]) < MAX_M && std::abs(m[6]) < MAX_M*256 && std::abs(m[7]) < MAX_M*256 &&
+            std::abs(m[8]) < MAX_M && std::abs(m[9]) < MAX_M && std::abs(m[10]) < MAX_M*256 && std::abs(m[11]) < MAX_M*256 )
+        {
+            int16_t m0 = saturate_cast<short>(m[0] * SCALE);
+            int16_t m1 = saturate_cast<short>(m[1] * SCALE);
+            int32x4_t vm2 = vdupq_n_s32(saturate_cast<int>(m[2] * SCALE));
+            int32x4_t vm3 = vdupq_n_s32(saturate_cast<int>(m[3] * SCALE));
+
+            int16_t m4 = saturate_cast<short>(m[4] * SCALE);
+            int16_t m5 = saturate_cast<short>(m[5] * SCALE);
+            int32x4_t vm6 = vdupq_n_s32(saturate_cast<int>(m[6] * SCALE));
+            int32x4_t vm7 = vdupq_n_s32(saturate_cast<int>(m[7] * SCALE));
+
+            int16_t m8 = saturate_cast<short>(m[8] * SCALE);
+            int16_t m9 = saturate_cast<short>(m[9] * SCALE);
+            int32x4_t vm10 = vdupq_n_s32(saturate_cast<int>(m[10] * SCALE));
+            int32x4_t vm11 = vdupq_n_s32(saturate_cast<int>(m[11] * SCALE));
+            
+            int i = 0;
+            #pragma omp parallel for num_threads(4) schedule(static)
+            for (i = 0; i <= (len - 16); i += 16)
+            {
+                uint8x16x3_t v_src = vld3q_u8(src + i * 3);
+                uint8x16_t vb = v_src.val[0];
+                uint8x16_t vg = v_src.val[1];
+                uint8x16_t vr = v_src.val[2];
+
+                int16x8_t bl = vreinterpretq_s16_u16(vmovl_low_u8(vb));
+                
+                int16x8_t bh = vreinterpretq_s16_u16(vmovl_high_u8(vb));
+                int16x8_t gl = vreinterpretq_s16_u16(vmovl_low_u8(vg));
+                int16x8_t gh = vreinterpretq_s16_u16(vmovl_high_u8(vg));
+                uint16x8_t rl = vmovl_low_u8(vr);
+                uint16x8_t rh = vmovl_high_u8(vr);
+                int32x4_t rl_low = vreinterpretq_s32_u32(vmovl_low_u16(rl));
+
+                int32x4_t rl_high = vreinterpretq_s32_u32(vmovl_high_u16(rl));
+                int32x4_t rh_low = vreinterpretq_s32_u32(vmovl_low_u16(rh));
+                int32x4_t rh_high = vreinterpretq_s32_u32(vmovl_high_u16(rh));
+
+
+                auto calc_chn = [&](int16_t c0, int16_t c1, int32x4_t c2, int32x4_t c3_bias) {
+                    int32x4_t res_l_0 = c3_bias;
+                    int32x4_t res_l_1 = c3_bias;
+                    int32x4_t res_h_0 = c3_bias;
+                    int32x4_t res_h_1 = c3_bias;
+
+                    res_l_0 = vmlal_low_n_s16(res_l_0, bl, c0);
+                    res_l_1 = vmlal_high_n_s16(res_l_1, (bl), c0);
+                    res_h_0 = vmlal_low_n_s16(res_h_0, bh, c0);
+                    res_h_1 = vmlal_high_n_s16(res_h_1, (bh), c0);
+
+                    res_l_0 = vmlal_low_n_s16(res_l_0, (gl), c1);
+                    res_l_1 = vmlal_high_n_s16(res_l_1, (gl), c1);
+                    res_h_0 = vmlal_low_n_s16(res_h_0, gh, c1);
+                    res_h_1 = vmlal_high_n_s16(res_h_1, (gh), c1);
+
+                    res_l_0 = vmlaq_s32(res_l_0, rl_low, c2);
+                    res_l_1 = vmlaq_s32(res_l_1, rl_high, c2);
+                    res_h_0 = vmlaq_s32(res_h_0, rh_low, c2);
+                    res_h_1 = vmlaq_s32(res_h_1, rh_high, c2);
+
+                    uint16x8_t res_l_u16 = vqrshrun_high_n_s32(vqrshrun_n_s32(res_l_0, BITS), res_l_1, BITS);
+                    uint16x8_t res_h_u16 = vqrshrun_high_n_s32(vqrshrun_n_s32(res_h_0, BITS), res_h_1, BITS);
+                    return vqmovn_high_u16(vqmovn_u16(res_l_u16), res_h_u16);
+                };
+                uint8x16x3_t v_dst;
+                v_dst.val[0] = calc_chn(m0, m1, vm2, vm3);
+                v_dst.val[1] = calc_chn(m4, m5, vm6, vm7);
+                v_dst.val[2] = calc_chn(m8, m9, vm10, vm11);
+
+                // 交织存储bgr
+                vst3q_u8(dst + i * 3, v_dst);
+            }
+
+            // --- 向量处理结束：记录处理位置 ---
+            int x = (len / 16) * 16;
+
+            // 剩余的像素
+            const int ROUND_DELTA = 512; // 四舍五入的偏移
+            for(; x < len; x++)
+            {
+                int b = src[x * 3];
+                int g = src[x * 3 + 1];
+                int r = src[x * 3 + 2];
+
+                dst[x * 3]     = saturate_cast<uchar>((m0 * b + m1 * g + saturate_cast<int>(m[2] * SCALE) * r + saturate_cast<int>(m[3] * SCALE) + ROUND_DELTA) >> BITS);
+                dst[x * 3 + 1] = saturate_cast<uchar>((m4 * b + m5 * g + saturate_cast<int>(m[6] * SCALE) * r + saturate_cast<int>(m[7] * SCALE) + ROUND_DELTA) >> BITS);
+                dst[x * 3 + 2] = saturate_cast<uchar>((m8 * b + m9 * g + saturate_cast<int>(m[10] * SCALE) * r + saturate_cast<int>(m[11] * SCALE) + ROUND_DELTA) >> BITS);
+            }
+            return ;
+        }
+    }
+#endif
+
+if (CV_SIMD || CV_SIMD_SCALABLE)
     const int BITS = 10, SCALE = 1 << BITS;
     const float MAX_M = (float)(1 << (15 - BITS));
 
