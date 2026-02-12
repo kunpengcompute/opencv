@@ -7,10 +7,8 @@
 ``` bash
 unzip opencv-4.10.0.zip #解压后得到/home/opencv-4.10.0
 ```
-#### 2.下载[本仓库文件](https://raw.gitcode.com/boostkit/opencv/archive/refs/heads/master.zip)到/home目录下并解压
+#### 2.下载本仓库文件到/home目录下
 ``` bash
-unzip opencv-master.zip #解压后得到/home/opencv-master
-#或者使用git clone方式
 git clone https://gitcode.com/boostkit/opencv.git
 ```
 #### 3.安装依赖库
@@ -24,7 +22,7 @@ yum install -y binutils cmake git pkgconfig make patch gcc-10.3.1 gcc-c++-10.3.1
 ``` bash
 cd /home/opencv-4.10.0
 # 复制补丁文件
-cp /home/opencv-master/*.patch ./
+cp /home/opencv/*.patch ./
 # 应用优化补丁
 for patch in $(ls -v *.patch); do patch -p1 < "$patch"; done
 ```
