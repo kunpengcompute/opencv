@@ -43,10 +43,10 @@ int main()
     return 0;
 }
 ```
-#### 2. 配置环境变量，其中/usr/local/是OpenCV安装路径，根据实际安装路径进行修改
+#### 2. 配置环境变量，其中/home/opencv_install/是OpenCV安装路径，根据实际安装路径进行修改
 ``` bash
-export PKG_CONFIG_PATH=/usr/local/lib64/pkgconfig:$PKG_CONFIG_PATH
-export LD_LIBRARY_PATH=/usr/local/lib64:$LD_LIBRARY_PATH
+export PKG_CONFIG_PATH=/home/opencv_install/lib64/pkgconfig:$PKG_CONFIG_PATH
+export LD_LIBRARY_PATH=/home/opencv_install/lib64:$LD_LIBRARY_PATH
 ```
 #### 3. 运行程序
 ``` bash
