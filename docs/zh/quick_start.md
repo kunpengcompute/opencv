@@ -1,9 +1,9 @@
 
 # 快速入门
 
-## python调用方式
+## Python调用方式
 
-### 1.新建quick_start.py，并写入下面的内容
+**步骤1** 新建`quick_start.py`文件，并写入以下内容后，保存文件。
 
 ``` python
 #导入cv2库
@@ -15,7 +15,7 @@ mean_values = cv2.mean(img)
 print("各通道平均值 (B, G, R, A):", mean_values)
 ```
 
-### 2.运行程序
+**步骤2** 运行`quick_start.py`。
 
 ``` bash
 python3 quick_start.py
@@ -23,7 +23,7 @@ python3 quick_start.py
 
 ## c++调用方式
 
-### 1.新建quick_start.cpp，并写入下面的内容
+**步骤1** 新建`quick_start.cpp`文件，并写入以下内容后，保存文件。
 
 ``` c++
 // 引入OpenCV头文件
@@ -52,14 +52,14 @@ int main()
 }
 ```
 
-### 2. 配置环境变量，其中/home/opencv_install/是OpenCV安装路径，根据实际安装路径进行修改
+**步骤2** 配置环境变量。其中`/home/opencv_install/`是OpenCV的安装路径，请根据实际安装路径进行修改。
 
 ``` bash
 export PKG_CONFIG_PATH=/home/opencv_install/lib64/pkgconfig:$PKG_CONFIG_PATH
 export LD_LIBRARY_PATH=/home/opencv_install/lib64:$LD_LIBRARY_PATH
 ```
 
-### 3. 运行程序
+**步骤3** 编译并运行`quick_start.cpp`。
 
 ``` bash
 g++ quick_start.cpp -o quick_start $(pkg-config --cflags --libs opencv4)

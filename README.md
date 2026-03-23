@@ -1,6 +1,10 @@
-# 简介
+# OpenCV介绍
 
-## 项目介绍
+## 最新消息
+
+* 基于鲲鹏服务器对开源 OpenCV 常用函数进行性能优化，涉及函数包括：`erode`、`Canny`、`HoughLines`、`HoughCircles`、`norm`、`mean`、`determinant`、`completeSymm`、`eigen`、`moments`、`minAreaRect`、`connectedComponents`、`connectedComponentsWithStats`、`minMaxLoc`、`warpPerspective`、`rotate`、`perspectiveTransform`、`transform`。
+
+## 简介
 
 鲲鹏OpenCV代码仓是基于鲲鹏服务器对开源OpenCV进行优化的成果。存放OpenCV性能优化的相关补丁。补丁主要对超声医疗、AIGC、工业质检等领域的常用图像函数进行性能优化。
 
