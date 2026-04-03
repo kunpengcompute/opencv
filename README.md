@@ -2,7 +2,7 @@
 
 ## 最新消息
 
-* 基于鲲鹏服务器对开源 OpenCV 常用函数进行性能优化，涉及函数包括：`erode`、`Canny`、`HoughLines`、`HoughCircles`、`norm`、`mean`、`determinant`、`completeSymm`、`eigen`、`moments`、`minAreaRect`、`connectedComponents`、`connectedComponentsWithStats`、`minMaxLoc`、`warpPerspective`、`rotate`、`perspectiveTransform`、`transform`。
+* [2026.03.30]: 基于鲲鹏服务器对开源 OpenCV 常用函数进行性能优化，涉及函数包括：`erode`、`Canny`、`HoughLines`、`HoughCircles`、`norm`、`mean`、`determinant`、`completeSymm`、`eigen`、`moments`、`minAreaRect`、`connectedComponents`、`connectedComponentsWithStats`、`minMaxLoc`、`warpPerspective`、`rotate`、`perspectiveTransform`、`transform`。
 
 ## 简介
 
