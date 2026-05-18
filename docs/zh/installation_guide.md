@@ -6,19 +6,19 @@
 
 ## 环境要求
 
-**硬件环境**
+**表1 硬件环境要求**
 
 | 项目  | 说明    |
 | ------------ | ------------ |
 | CPU | 鲲鹏920新型号处理器 |
 
-**操作系统要求**
+**表2 操作系统要求**
 
 | 项目  | 版本    |
 | ------------ | ------------ |
 | OS | openEuler 22.03 LTS SP4 |
 
-**软件环境**
+**表3 软件环境要求**
 
 | 项目  | 版本    |
 | ------------ | ------------ |
@@ -51,21 +51,18 @@
     yum install -y binutils cmake git pkgconfig make patch gcc-10.3.1 gcc-c++-10.3.1 lapack ffmpeg ffmpeg-devel libjpeg-* python3-devel python3-numpy
     ```
 
-4. 应用优化补丁。
+4. 应用优化补丁。将鲲鹏优化补丁拷贝到opencv-4.10.0目录中，并应用优化补丁。
 
     ``` bash
     cd /home/opencv-4.10.0
-    # 复制补丁文件
     cp /home/opencv/*.patch ./
-    # 应用优化补丁
     for patch in $(ls -v *.patch); do patch -p1 < "$patch"; done
     ```
 
-5. 编译安装OpenCV。
+5. 编译安装OpenCV。其中，执行cmake时，默认安装位置/home/opencv_install，可根据需要修改。
 
     ``` bash
-    mkdir build && cd build
-    # 执行cmake，默认安装位置/home/opencv_install，可根据需要修改
+    mkdir build && cd build    
     cmake -D CMAKE_BUILD_TYPE=RELEASE \
         -D CMAKE_INSTALL_PREFIX=/home/opencv_install \
         -D CMAKE_CXX_FLAGS="-O3 -march=armv8-a" \
@@ -73,8 +70,7 @@
         -D BUILD_opencv_python3=ON\
         -D OPENCV_GENERATE_PKGCONFIG=ON \
         -D WITH_OPENMP=ON \
-        -D PYTHON3_EXECUTABLE=$(which python3) ..
-    # 开始编译安装
+        -D PYTHON3_EXECUTABLE=$(which python3) ..    
     make -j && make install
     ```
 
@@ -100,10 +96,9 @@
     -D CMAKE_SKIP_RPATH=ON \
     ```
 
-6. 验证OpenCV是否成功安装。
+6. 验证OpenCV是否成功安装。设置环境变量PYTHONPATH，/home/opencv_install是OpenCV安装路径，python3.9是系统的python版本
 
-    ``` bash
-    #设置环境变量，/home/opencv_install是OpenCV安装路径，python3.9是系统的python版本
+    ``` bash    
     export PYTHONPATH="/home/opencv_install/lib/python3.9/site-packages:$PYTHONPATH"
     python3 -c "import cv2; print(cv2.__version__)"
     ```
