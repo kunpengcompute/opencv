@@ -23,7 +23,7 @@ Software environment
 
 ## Procedure
 >
-> >![](public_sys-resources/icon-notice.gif) **NOTICE**
+> > **NOTICE**
 >You are advised to enable system hyper-threading to obtain the optimal performance.
 >
 **Step 1** Download and decompress the OpenCV source code package based on the version mapping. Copy the OpenCV source code package [`opencv-4.10.0.zip`](https://github.com/opencv/opencv/archive/refs/tags/4.10.0.zip) to the `/home` directory and decompress it.
@@ -31,6 +31,7 @@ Software environment
 ``` bash
 unzip opencv-4.10.0.zip
 ```
+
 `/home/opencv-4.10.0` is obtained after the decompression.
 
 **Step 2** Download the files in this repository to the `/home` directory.
@@ -101,4 +102,5 @@ In `CMAKE_C_FLAGS` and `CMAKE_CXX_FLAGS`, add the required security configuratio
 export PYTHONPATH="/home/opencv_install/lib/python3.9/site-packages:$PYTHONPATH"
 python3 -c "import cv2; print(cv2.__version__)"
 ```
+
 If the OpenCV version number is displayed, the installation is successful.
