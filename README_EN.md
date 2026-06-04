@@ -12,9 +12,9 @@ Kunpeng OpenCV optimizes OpenCV based on Kunpeng servers. It stores patches for 
 
 OpenCV is an open-source computer vision library that provides a wide range of image and video processing functions, including image filtering, edge detection, feature extraction, object recognition, face detection, camera calibration, and motion tracking. It is widely used in fields such as facial recognition, autonomous driving, augmented reality, medical image analysis, security surveillance, and industrial automation. It supports multiple programming languages (such as Python and C++) and cross-platform deployment. It is one of the most commonly used core tools in computer vision development.
 
-# Directory Structure
+## Directory Structure
 
-``` bash
+``` text
 ├── docs/                  # Documentation
     ├── en                 # English documentation
         ├── deploy.md      # Environment deployment
@@ -26,23 +26,21 @@ OpenCV is an open-source computer vision library that provides a wide range of i
 ├── README.md              # Project introduction document
 ```
 
-# Version Description
-
-## Version Mapping
+## Release Notes
 
 | Patch Version| GCC Version|Matching OpenCV Version| Download Link                                                    |
 | -------- | -------- |-------------- | ------------------------------------------------------------ |
 | 1.0.1   | 10.3.1   |4.10.0         | [Download link](https://github.com/opencv/opencv/archive/refs/tags/4.10.0.zip)|
 
-# Environment Deployment
+## Environment Deployment
 
 For details about how to deploy the Kunpeng OpenCV environment, see [Kunpeng OpenCV Deployment Guide](./docs/en/deployment_guide.md).
 
-# Quick Start
+## Quick Start
 
 The mean function is used as an example to calculate the mean value of each channel of an image. For details, see [Quick Start](./docs/en/quick_start.md).
 
-# Features
+## Features
 
 The patches for optimizing the OpenCV performance in this repository mainly optimize the performance of functions in the following table.
 
@@ -67,15 +65,15 @@ The patches for optimizing the OpenCV performance in this repository mainly opti
 | `perspectiveTransform`         | Applies perspective transformation to a 2D or 3D point set (using a 3×3 homography matrix).         |
 | `transform`                    | Applies affine or linear transformation (using a 2×3 or 3×3 transformation matrix) to a point set, which is commonly used for coordinate mapping.|
 
-# Helpful Links
+## Helpful Links
 
 For details, see the [OpenCV documentation](https://docs.opencv.org/4.10.0/).
 
-# License
+## License
 
-This project is licensed under Apache License Version 2.0. For details, see [LICENSE](./LICENSE).
+This project is licensed under Apache License Version 2.0. For details, see [LICENSE](./LICENSE).  
 The documents of this project are licensed under CC-BY 4.0. For details, see [LICENSE](./docs/en/LICENSE).
 
-# Contribution Statement
+## Contribution Statement
 
 We welcome your contributions to the community. If you have any questions/suggestions or want to provide feedback on feature requirements and bug reports, you can submit [issues](https://gitcode.com/boostkit/opencv/issues). For details, see the [contribution guideline](https://gitcode.com/boostkit/community/blob/master/docs/contributor/contributing.md). You are also welcome to share insights in [Discussions](https://gitcode.com/boostkit/community/discussions). Thank you for your support.

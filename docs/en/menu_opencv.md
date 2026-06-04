@@ -1,3 +1,3 @@
-- [项目介绍](../../README_EN.md)
-- [安装指南](installation_guide.md)
-- [快速入门](quick_start.md)
+- [Project Introduction](../../README_EN.md)
+- [Installation Guide](installation_guide.md)
+- [Quick Start](quick_start.md)
