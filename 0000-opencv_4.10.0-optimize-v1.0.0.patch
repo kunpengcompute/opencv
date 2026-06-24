@@ -1,0 +1,3516 @@
+diff -Naur org/opencv/modules/core/src/arithm.cpp opencv/modules/core/src/arithm.cpp
+--- org/opencv/modules/core/src/arithm.cpp	2026-06-24 12:31:00.331950475 +0800
++++ opencv/modules/core/src/arithm.cpp	2026-06-12 14:49:06.244120037 +0800
+@@ -356,9 +356,56 @@
+ }
+ 
+ }
++namespace cv {
++
++static int kcv_bitwise_and(InputArray _src1, InputArray _src2, OutputArray _dst)
++{
++    if (_src1.empty() || _src2.empty()) {
++        return 1;
++    }
++    const Mat src1 = _src1.getMat();
++    const Mat src2 = _src2.getMat();
++    _dst.create(_src1.size(), _src1.type());
++    Mat dst = _dst.getMat();
++    const int len = src1.total() * src1.channels();
++    uchar *srcp1 = src1.data;
++    uchar *srcp2 = src2.data;
++    uchar *dstp = dst.data;
++#pragma omp parallel for num_threads(8)
++    for (int i = 0; i <= len - 16; i += 16) { // 16 step
++        vst1q_u8(dstp + i, vandq_u8(vld1q_u8(srcp1 + i), vld1q_u8(srcp2 + i)));
++    }
++    return 0;
++}
++
++static int kcv_bitwise_or(InputArray _src1, InputArray _src2, OutputArray _dst)
++{
++    if (_src1.empty() || _src2.empty()) {
++        return 1;
++    }
++    const Mat src1 = _src1.getMat();
++    const Mat src2 = _src2.getMat();
++    _dst.create(_src1.size(), _src1.type());
++    Mat dst = _dst.getMat();
++    const int len = src1.total() * src1.channels();
++    uchar *srcp1 = src1.data;
++    uchar *srcp2 = src2.data;
++    uchar *dstp = dst.data;
++#pragma omp parallel for num_threads(8)
++    for (int i = 0; i <= len - 16; i += 16) { // 16 step
++        vst1q_u8(dstp + i, vorrq_u8(vld1q_u8(srcp1 + i), vld1q_u8(srcp2 + i)));
++    }
++    return 0;
++}
++}  // namespace cv
+ 
+ void cv::bitwise_and(InputArray a, InputArray b, OutputArray c, InputArray mask)
+ {
++    int retcode = cv::kcv_bitwise_and(a, b, c);
++    if(retcode == 0 || retcode == 1){
++        (void)mask;
++        return;
++    }
+     CV_INSTRUMENT_REGION();
+ 
+     BinaryFuncC f = (BinaryFuncC)GET_OPTIMIZED(cv::hal::and8u);
+@@ -367,6 +414,11 @@
+ 
+ void cv::bitwise_or(InputArray a, InputArray b, OutputArray c, InputArray mask)
+ {
++    int retcode = cv::kcv_bitwise_or(a, b, c);
++    if(retcode == 0 || retcode == 1){
++        (void)mask;
++        return;
++    }
+     CV_INSTRUMENT_REGION();
+ 
+     BinaryFuncC f = (BinaryFuncC)GET_OPTIMIZED(cv::hal::or8u);
+diff -Naur org/opencv/modules/core/src/convert.dispatch.cpp opencv/modules/core/src/convert.dispatch.cpp
+--- org/opencv/modules/core/src/convert.dispatch.cpp	2026-06-24 12:31:00.331950475 +0800
++++ opencv/modules/core/src/convert.dispatch.cpp	2026-06-12 14:49:06.244120037 +0800
+@@ -245,8 +245,60 @@
+ }
+ #endif
+ 
++using ConvertToFunc = void (*)(const Mat &src, Mat &dst, float a);
++
++static void inline cvt_32f8u(const Mat &_src, Mat &_dst, float a)
++{
++    const int len = _src.total() * _src.channels();
++    const float *src = (float*)_src.data;
++    uchar *dst = _dst.data;
++    // 已自动向量化
++#pragma omp parallel for num_threads(16)
++    for (int i = 0; i < len; i++) {
++        dst[i] = static_cast<uchar>(src[i] * a);
++    }
++}
++
++static void inline cvt_8u32f(const Mat &_src, Mat &_dst, float a)
++{
++    const int len = _src.total() * _src.channels();
++    const uchar *src = _src.data;
++    float *dst = (float *)_dst.data;
++    // 已自动向量化
++#pragma omp parallel for num_threads(16)
++    for (int i = 0; i < len; i++) {
++        dst[i] = static_cast<float>(src[i] * a);
++    }
++}
++
++static int kcv_convertTo(InputArray _src, OutputArray _dst, int type, double alpha)
++{
++    if (_src.empty()) {
++        return 1;
++    }
++    if (!((CV_MAT_DEPTH(_src.type()) == CV_8U && type == CV_32F) ||
++        (CV_MAT_DEPTH(_src.type()) == CV_32F && type == CV_8U))) {
++        return 2;
++    }
++    int ddepth = CV_MAT_DEPTH(type);
++    int dtype = CV_MAKETYPE(ddepth, _src.channels());
++    _dst.create(_src.size(), dtype);
++    static ConvertToFunc convertToTab[8][8];  // 8:opencv支持的数据类型个数
++    convertToTab[CV_32F][CV_8U] = cvt_32f8u;
++    convertToTab[CV_8U][CV_32F] = cvt_8u32f;
++    ConvertToFunc func = convertToTab[_src.depth()][type];
++    Mat src = _src.getMat();
++    Mat dst = _dst.getMat();
++    func(_src.getMat(), dst, (float)alpha);
++    return 0;
++}
++
+ void Mat::convertTo(OutputArray dst, int type_, double alpha, double beta) const
+ {
++    Mat _src = *this;
++    int retcode = kcv_convertTo(_src, dst, type_, alpha);
++    if(retcode == 0 || retcode == 1)
++        return;
+     CV_INSTRUMENT_REGION();
+ 
+     if (empty())
+diff -Naur org/opencv/modules/core/src/copy.cpp opencv/modules/core/src/copy.cpp
+--- org/opencv/modules/core/src/copy.cpp	2026-06-24 12:31:00.331950475 +0800
++++ opencv/modules/core/src/copy.cpp	2026-06-12 14:49:06.244120037 +0800
+@@ -1017,10 +1017,70 @@
+ }
+ }
+ #endif
++namespace cv {
++static void copyMakeBorder_8UC3(
++    const cv::Mat &src, cv::Mat &dst, int top, int bottom, int left, int right, const cv::Scalar &value)
++{
++    const int rows = src.rows;
++    const int cols = src.cols;
++#pragma omp parallel for num_threads(32)
++    for (int i = top; i < rows + bottom; i++) {
++        Vec3b *dst_row = dst.ptr<Vec3b>(i);
++        const Vec3b *src_row = src.ptr<Vec3b>(i - top);
++
++        for (int j = left; j < cols + right; j++) {
++            dst_row[j] = src_row[j - left];
++        }
++        for (int j = 0; j < left; j++) {
++            dst_row[j] = cv::Vec3b(
++                static_cast<uchar>(value[0]), static_cast<uchar>(value[1]), static_cast<uchar>(value[2]));  // 2 index
++        }
++        for (int j = cols + left; j < cols + right + left; j++) {
++            dst_row[j] = cv::Vec3b(
++                static_cast<uchar>(value[0]), static_cast<uchar>(value[1]), static_cast<uchar>(value[2]));  // 2 index
++        }
++    }
++
++    for (int i = 0; i < top; i++) {
++        Vec3b *dst_row = dst.ptr<Vec3b>(i);
++        for (int j = 0; j < cols + left + right; j++) {
++            dst_row[j] = cv::Vec3b(
++                static_cast<uchar>(value[0]), static_cast<uchar>(value[1]), static_cast<uchar>(value[2]));  // 2 index
++        }
++    }
++
++    for (int i = rows + top; i < rows + top + bottom; i++) {
++        Vec3b *dst_row = dst.ptr<Vec3b>(i);
++        for (int j = 0; j < cols + left + right; j++) {
++            dst_row[j] = cv::Vec3b(
++                static_cast<uchar>(value[0]), static_cast<uchar>(value[1]), static_cast<uchar>(value[2]));  // 2 index
++        }
++    }
++}
++static int kcv_copyMakeBorder(
++    InputArray _src, OutputArray _dst, int top, int bottom, int left, int right, int borderType, const Scalar &value)
++{
++    if (_src.empty()) {
++        return 1;
++    }
++    if (!((_src.type() == CV_8UC3) && (borderType == BORDER_CONSTANT))) {
++        return 2;
++    }
++    const Mat src = _src.getMat();
++    _dst.create(src.rows + top + bottom, src.cols + left + right, _src.type());
++    Mat dst = _dst.getMat();
++    copyMakeBorder_8UC3(src, dst, top, bottom, left, right, value);
++    return 0;
++}
++}  // namespace cv
+ 
+ void cv::copyMakeBorder( InputArray _src, OutputArray _dst, int top, int bottom,
+                          int left, int right, int borderType, const Scalar& value )
+ {
++    int retcode = cv::kcv_copyMakeBorder(_src, _dst, top, bottom, left, right, borderType, value);
++    if(retcode == 0 || retcode == 1){
++        return;
++    }
+     CV_INSTRUMENT_REGION();
+ 
+     CV_Assert( top >= 0 && bottom >= 0 && left >= 0 && right >= 0 && _src.dims() <= 2);
+diff -Naur org/opencv/modules/core/src/count_non_zero.dispatch.cpp opencv/modules/core/src/count_non_zero.dispatch.cpp
+--- org/opencv/modules/core/src/count_non_zero.dispatch.cpp	2026-06-24 12:31:00.331950475 +0800
++++ opencv/modules/core/src/count_non_zero.dispatch.cpp	2026-06-12 14:49:06.244120037 +0800
+@@ -116,8 +116,40 @@
+ }
+ #endif
+ 
++static int kcv_countNonZero(InputArray _src, int & count)
++{
++    if (_src.empty()) {
++        return 1;
++    }
++    if (_src.depth() != CV_8U) {
++        return 2;
++    }
++    Mat src = _src.getMat();
++    uchar *data = src.data;
++    int len = src.total() * src.channels();
++    int nz = 0;
++    uint8x16_t v0 = vdupq_n_u8(0);
++    uint8x16_t v1 = vdupq_n_u8(1);
++#pragma omp parallel for reduction(+ : nz) num_threads(16)
++    for (int i = 0; i <= len - 16; i += 16) { // 16 for
++        auto v_src = vld1q_u8(data + i);
++        uint8x16_t mask = vceqq_u8(v_src, v0);
++        auto res = vbslq_u8(mask, v0, v1);
++        nz+=vaddvq_u8(res);
++    }
++    for (int i = len - len % 16; i < len; i++) {
++        nz += data[i] != 0;
++    }
++    count = nz;
++    return 0;
++}
++
+ int countNonZero(InputArray _src)
+ {
++    int count = 0;
++    int retcode = kcv_countNonZero(_src, count);
++    if(retcode == 0 || retcode == 1)
++        return count;
+     CV_INSTRUMENT_REGION();
+ 
+     int type = _src.type(), cn = CV_MAT_CN(type);
+diff -Naur org/opencv/modules/core/src/matrix_transform.cpp opencv/modules/core/src/matrix_transform.cpp
+--- org/opencv/modules/core/src/matrix_transform.cpp	2026-06-24 12:31:00.331950475 +0800
++++ opencv/modules/core/src/matrix_transform.cpp	2026-06-12 14:49:06.244120037 +0800
+@@ -245,9 +245,135 @@
+ }
+ #endif
+ 
++constexpr int BLOCK_SIZE1 = 8;   // 分块矩阵块大小
++enum class BlockRow : uint8_t {
++    BLOCK_ROW0,
++    BLOCK_ROW1,
++    BLOCK_ROW2,
++    BLOCK_ROW3,
++    BLOCK_ROW4,
++    BLOCK_ROW5,
++    BLOCK_ROW6,
++    BLOCK_ROW7,
++};
++
++static void TransposeLeftrow(cv::Mat& src, cv::Mat& dst, int startRow, int startCol)
++{
++    for (int i = startRow; i < src.rows; i++) {
++        for (int j = startCol; j < startCol + BLOCK_SIZE1 && j < src.cols; j++) {
++            dst.at<uint8_t>(j, i) = src.at<uint8_t>(i, j);
++        }
++    }
++}
++
++static void TransposeLeftcol(cv::Mat& src, cv::Mat& dst, int startRow, int startCol)
++{
++    for (int i = startRow; i < startRow + BLOCK_SIZE1 && i < src.rows; i++) {
++        for (int j = startCol; j < src.cols; j++) {
++            dst.at<uint8_t>(j, i) = src.at<uint8_t>(i, j);
++        }
++    }
++}
++
++static void TransposeCorner(cv::Mat& src, cv::Mat& dst, int startRow, int startCol)
++{
++    for (int i = startRow; i < src.rows; i++) {
++        for (int j = startCol; j < src.cols; j++) {
++            dst.at<uint8_t>(j, i) = src.at<uint8_t>(i, j);
++        }
++    }
++}
++static void transposeNeon(cv::Mat& src, cv::Mat& dst, int i, int j)
++{
++    int row = src.rows;
++    int col = src.cols;
++
++    // 数据载入neon寄存器
++    uint8x8_t row0 = vld1_u8(src.data + (i + static_cast<uint8_t>(BlockRow::BLOCK_ROW0)) * col + j);
++    uint8x8_t row1 = vld1_u8(src.data + (i + static_cast<uint8_t>(BlockRow::BLOCK_ROW1)) * col + j);
++    uint8x8_t row2 = vld1_u8(src.data + (i + static_cast<uint8_t>(BlockRow::BLOCK_ROW2)) * col + j);
++    uint8x8_t row3 = vld1_u8(src.data + (i + static_cast<uint8_t>(BlockRow::BLOCK_ROW3)) * col + j);
++    uint8x8_t row4 = vld1_u8(src.data + (i + static_cast<uint8_t>(BlockRow::BLOCK_ROW4)) * col + j);
++    uint8x8_t row5 = vld1_u8(src.data + (i + static_cast<uint8_t>(BlockRow::BLOCK_ROW5)) * col + j);
++    uint8x8_t row6 = vld1_u8(src.data + (i + static_cast<uint8_t>(BlockRow::BLOCK_ROW6)) * col + j);
++    uint8x8_t row7 = vld1_u8(src.data + (i + static_cast<uint8_t>(BlockRow::BLOCK_ROW7)) * col + j);
++    // 第一次交叉存取
++    uint8x8x2_t t0 = vtrn_u8(row0, row1);
++    uint8x8x2_t t1 = vtrn_u8(row2, row3);
++    uint8x8x2_t t2 = vtrn_u8(row4, row5);
++    uint8x8x2_t t3 = vtrn_u8(row6, row7);
++    // 通过类型转换绑定数据并进行第二次交叉存取
++    uint16x4x2_t tt0 = vtrn_u16(vreinterpret_u16_u8(t0.val[0]), vreinterpret_u16_u8(t1.val[0]));
++    uint16x4x2_t tt1 = vtrn_u16(vreinterpret_u16_u8(t0.val[1]), vreinterpret_u16_u8(t1.val[1]));
++    uint16x4x2_t tt2 = vtrn_u16(vreinterpret_u16_u8(t2.val[0]), vreinterpret_u16_u8(t3.val[0]));
++    uint16x4x2_t tt3 = vtrn_u16(vreinterpret_u16_u8(t2.val[1]), vreinterpret_u16_u8(t3.val[1]));
++    // 通过类型转换绑定数据并进行第三次交叉存取
++    uint32x2x2_t ttt0 = vtrn_u32(vreinterpret_u32_u16(tt0.val[0]), vreinterpret_u32_u16(tt2.val[0]));
++    uint32x2x2_t ttt1 = vtrn_u32(vreinterpret_u32_u16(tt0.val[1]), vreinterpret_u32_u16(tt2.val[1]));
++    uint32x2x2_t ttt2 = vtrn_u32(vreinterpret_u32_u16(tt1.val[0]), vreinterpret_u32_u16(tt3.val[0]));
++    uint32x2x2_t ttt3 = vtrn_u32(vreinterpret_u32_u16(tt1.val[1]), vreinterpret_u32_u16(tt3.val[1]));
++    // 寄存器数据写入内存
++    vst1_u8(dst.data + (j + static_cast<uint8_t>(BlockRow::BLOCK_ROW0)) * row + i, vreinterpret_u8_u32(ttt0.val[0]));
++    vst1_u8(dst.data + (j + static_cast<uint8_t>(BlockRow::BLOCK_ROW1)) * row + i, vreinterpret_u8_u32(ttt2.val[0]));
++    vst1_u8(dst.data + (j + static_cast<uint8_t>(BlockRow::BLOCK_ROW2)) * row + i, vreinterpret_u8_u32(ttt1.val[0]));
++    vst1_u8(dst.data + (j + static_cast<uint8_t>(BlockRow::BLOCK_ROW3)) * row + i, vreinterpret_u8_u32(ttt3.val[0]));
++    vst1_u8(dst.data + (j + static_cast<uint8_t>(BlockRow::BLOCK_ROW4)) * row + i, vreinterpret_u8_u32(ttt0.val[1]));
++    vst1_u8(dst.data + (j + static_cast<uint8_t>(BlockRow::BLOCK_ROW5)) * row + i, vreinterpret_u8_u32(ttt2.val[1]));
++    vst1_u8(dst.data + (j + static_cast<uint8_t>(BlockRow::BLOCK_ROW6)) * row + i, vreinterpret_u8_u32(ttt1.val[1]));
++    vst1_u8(dst.data + (j + static_cast<uint8_t>(BlockRow::BLOCK_ROW7)) * row + i, vreinterpret_u8_u32(ttt3.val[1]));
++}
++
++static int kcv_transpose(InputArray _src, OutputArray _dst)
++{
++    Mat src = _src.getMat();
++    _dst.create(src.cols, src.rows, src.type());
++    Mat dst = _dst.getMat();
++    // 输入参数检验
++    if (_src.empty()) {
++        return 1;
++    }
++    if (src.data == nullptr) {
++        return 1;
++    }
++    if (src.type() != CV_8U) {
++        return 2;
++    }
++    int row = src.rows;
++    int col = src.cols;
++    int rowStart = row - (row % BLOCK_SIZE1);
++    int colStart = col - (col % BLOCK_SIZE1);
++    // 并行按8x8大小分块转置矩阵
++#pragma omp parallel for num_threads(10)
++    for (int i = 0; i < row; i += BLOCK_SIZE1) {
++        for (int j = 0; j < col; j += BLOCK_SIZE1) {
++            if (row - i >= BLOCK_SIZE1 && col - j >= BLOCK_SIZE1) {
++                transposeNeon(src, dst, i, j);
++            }
++        }
++    }
++    // 处理剩余部分
++    if (row % BLOCK_SIZE1 != 0) {
++        for (int j = 0; j < col; j += BLOCK_SIZE1) {
++            TransposeLeftrow(src, dst, rowStart, j);
++        }
++    }
++    if (col % BLOCK_SIZE1 != 0) {
++        for (int i = 0; i < row; i += BLOCK_SIZE1) {
++            TransposeLeftcol(src, dst, i, colStart);
++        }
++    }
++    if (row % BLOCK_SIZE1 != 0 && col % BLOCK_SIZE1 != 0) {
++        TransposeCorner(src, dst, rowStart, colStart);
++    }
++    return 0;
++}
+ 
+ void transpose( InputArray _src, OutputArray _dst )
+ {
++    int retcode = kcv_transpose(_src, _dst);
++    if(retcode == 0 || retcode == 1){
++        return;
++    }
+     CV_INSTRUMENT_REGION();
+ 
+     int type = _src.type(), esz = CV_ELEM_SIZE(type);
+diff -Naur org/opencv/modules/core/src/merge.dispatch.cpp opencv/modules/core/src/merge.dispatch.cpp
+--- org/opencv/modules/core/src/merge.dispatch.cpp	2026-06-24 12:31:00.331950475 +0800
++++ opencv/modules/core/src/merge.dispatch.cpp	2026-06-12 14:49:06.244120037 +0800
+@@ -257,10 +257,105 @@
+ }
+ 
+ #endif
++using MergeFunc = void (*)(const uchar **src, uchar *dst, int len, int cn);
++static void merge8u_neon(const uchar **src, uchar *dst, int len, int cn)
++{
++    const uchar *src0 = src[0];
++    const uchar *src1 = src[1];
++    const uchar *src2 = src[2];
++    int i = 0;
++#pragma omp parallel for num_threads(12)
++    for (i = 0; i <= len - 16; i += 16) {
++        vst3q_u8(dst + i * cn, {vld1q_u8(src0 + i), vld1q_u8(src1 + i), vld1q_u8(src2 + i)});
++    }
++
++    for (int i1 = len - len % 16; i1 < len; i1++) {
++        dst[cn * i1] = src0[i1];
++        dst[cn * i1 + 1] = src1[i1];
++        dst[cn * i1 + 2] = src2[i1];
++    }
++}
++
++static int kcv_merge(InputArrayOfArrays _mv, OutputArray _dst)
++{
++    std::vector<Mat> matVecs;
++    _mv.getMatVector(matVecs);
++    Mat *mv = &matVecs[0];
++    size_t matCount = matVecs.size();
++
++    if(!((mv != nullptr) && (matCount > 0) && (!mv[0].empty()))) {
++        return 1;
++    }
++    if(!((matCount == 3) && (mv[0].depth() == CV_8U))) {
++        return 2;
++    }
++
++    int depth = mv[0].depth();
++    bool isSingleChannel = true;
++    int channelCount = 0;
++    size_t planeIndex;
++
++    static MergeFunc mergeFuncs[CV_DEPTH_MAX] = {(MergeFunc)merge8u_neon};
++
++    for (planeIndex = 0; planeIndex < matCount; planeIndex++) {
++        if(!((matVecs[planeIndex].size == mv[0].size) &&
++                         (matVecs[planeIndex].depth() == depth))){
++                            return 1;
++                         }
++
++        isSingleChannel = isSingleChannel && matVecs[planeIndex].channels() == 1;
++        channelCount += matVecs[planeIndex].channels();
++    }
++
++    if(!((0 < channelCount) && (channelCount <= CV_CN_MAX))){
++        return 2;
++    }
++
++    _dst.create(mv[0].dims, mv[0].size, CV_MAKETYPE(depth, channelCount));
++    Mat dst = _dst.getMat();
++
++    MergeFunc mergeFunction = mergeFuncs[depth];
++
++    size_t elementSize = dst.elemSize();
++    size_t elementSize1 = dst.elemSize1();
++    size_t adjustedBlockSize = (int)((BLOCK_SIZE + elementSize - 1) / elementSize);
++
++    AutoBuffer<uchar> buffer((channelCount + 1) * (sizeof(Mat *) + sizeof(uchar *)) + 16);
++    const Mat **matArrays = (const Mat **)buffer.data();
++    uchar **pointerPtrs = (uchar **)alignPtr(matArrays + channelCount + 1, 16);
++
++    matArrays[0] = &dst;
++    for (int ch = 0; ch < channelCount; ch++)
++        matArrays[ch + 1] = &matVecs[ch];
++
++    NAryMatIterator naryIterator(matArrays, pointerPtrs, channelCount + 1);
++    size_t totalElements = (int)naryIterator.size;
++
++    size_t blockSize =
++        std::min((size_t)CV_SPLIT_MERGE_MAX_BLOCK_SIZE(channelCount), channelCount <= 4 ?
++            totalElements : std::min(totalElements, adjustedBlockSize));
++
++    for (planeIndex = 0; planeIndex < naryIterator.nplanes; planeIndex++, ++naryIterator) {
++        for (size_t idx = 0; idx < totalElements; idx += blockSize) {
++            size_t blockSizeActual = std::min(totalElements - idx, blockSize);
++            mergeFunction((const uchar **)&pointerPtrs[1], pointerPtrs[0], (int)blockSizeActual, channelCount);
++
++            if (idx + blockSize < totalElements) {
++                pointerPtrs[0] += blockSizeActual * elementSize;
++                for (int channel = 0; channel < channelCount; channel++)
++                    pointerPtrs[channel + 1] += blockSizeActual * elementSize1;
++            }
++        }
++    }
++    return 0;
++}
+ 
+ void merge(InputArrayOfArrays _mv, OutputArray _dst)
+ {
+     CV_INSTRUMENT_REGION();
++    int retcode = kcv_merge( _mv, _dst );
++    if(retcode == 0 || retcode == 1)
++        return;
+ 
+     CV_OCL_RUN(_mv.isUMatVector() && _dst.isUMat(),
+                ocl_merge(_mv, _dst))
+diff -Naur org/opencv/modules/imgproc/src/color.cpp opencv/modules/imgproc/src/color.cpp
+--- org/opencv/modules/imgproc/src/color.cpp	2026-06-24 12:31:00.331950475 +0800
++++ opencv/modules/imgproc/src/color.cpp	2026-06-12 14:49:06.244120037 +0800
+@@ -189,8 +189,178 @@
+ //                                   The main function                                  //
+ //////////////////////////////////////////////////////////////////////////////////////////
+ 
++// Set of accepted values for channels or depth checks
++template <int val0, int val1 = -1, int val2 = -1>
++struct ColorSet {
++    static inline bool contains(int val)
++    {
++        return (val == val0 || val == val1 || val == val2);
++    }
++};
++
++template <int val0, int val1>
++struct ColorSet<val0, val1, -1> {
++    static inline bool contains(int val)
++    {
++        return (val == val0 || val == val1);
++    }
++};
++
++template <int val0>
++struct ColorSet<val0, -1, -1> {
++    static inline bool contains(int val)
++    {
++        return (val == val0);
++    }
++};
++
++// Helper structure for color conversion, considering different formats and policies
++
++template <typename SrcScnSet, typename DstScnSet, typename DepthSet, SizePolicy policy = NONE>
++struct ColorConversionHelper {
++    ColorConversionHelper(InputArray _src, OutputArray _dst, int dstChannels)
++    {
++        int srcType = _src.type();
++        srcChannels = CV_MAT_CN(srcType), srcDepth = CV_MAT_DEPTH(srcType);
++
++        CV_Check(srcChannels, SrcScnSet::contains(srcChannels), "Invalid number of channels in input image");
++        CV_Check(dstChannels, DstScnSet::contains(dstChannels), "Invalid number of channels in output image");
++        CV_CheckDepth(srcDepth, DepthSet::contains(srcDepth), "Unsupported depth of input image");
++
++        if (_src.getObj() == _dst.getObj())  // In-place processing (#6653)
++            _src.copyTo(src);
++        else
++            src = _src.getMat();
++
++        Size srcSize = src.size();
++        dstSize = srcSize;
++        _dst.create(dstSize, CV_MAKETYPE(srcDepth, dstChannels));
++        dst = _dst.getMat();
++    }
++
++    Mat src, dst;
++    int srcDepth, srcChannels;
++    Size dstSize;
++};
++
++// Convert BGR to grayscale using Neon
++static void BGR2Gray_neon(const uint8_t *bgr, uint8_t *gray, int numPixels)
++{
++    uint8x8_t r = vdup_n_u8(77);
++    uint8x8_t g = vdup_n_u8(150);
++    uint8x8_t b = vdup_n_u8(29);
++
++#pragma omp parallel for num_threads(20)
++    for (int i = 0; i <= numPixels - 8; i += 8) {
++        uint8x8x3_t v_bgr = vld3_u8(bgr + i * 3);
++        vst1_u8(
++            gray + i, vshrn_n_u16(vmlal_u8(vmlal_u8(vmull_u8(v_bgr.val[0], b), v_bgr.val[1], g), v_bgr.val[2], r), 8));
++    }
++
++    for (int i = numPixels - numPixels % 8; i < numPixels; i++) {
++        gray[i] = static_cast<uint8_t>(0.114 * bgr[i * 3] + 0.587 * bgr[1 + i * 3] + 0.299 * bgr[2 + i * 3]);
++    }
++}
++
++// Convert BGR to Gray
++static void BGR2Gray(InputArray _src, OutputArray _dst)
++{
++    ColorConversionHelper<ColorSet<3, 4>, ColorSet<1>, ColorSet<CV_8U, CV_16U, CV_32F>> helper(_src, _dst, 1);
++    BGR2Gray_neon(helper.src.data, helper.dst.data, helper.src.cols * helper.src.rows);
++}
++
++// Convert RGB to RGB using Neon
++static void RGB2RGB_neon(const uchar *src, uchar *dst, int numPixels, int srcChannels, int dstChannels)
++{
++    const int vectorSize = 16;
++    const int blueIdx = 2;
++
++#pragma omp parallel for num_threads(12)
++    for (int i = 0; i <= numPixels - vectorSize; i += vectorSize) {
++        uint8x16x3_t v_rgb = vld3q_u8(src + i * srcChannels);
++        vst3q_u8(dst + i * dstChannels, {v_rgb.val[2], v_rgb.val[1], v_rgb.val[0]});
++    }
++
++    src = src + (numPixels / vectorSize) * vectorSize;
++    for (int i = (numPixels / vectorSize) * vectorSize; i < numPixels; i++, src += srcChannels, dst += dstChannels) {
++        dst[blueIdx] = src[0];
++        dst[1] = src[1];
++        dst[blueIdx ^ 2] = src[2];
++    }
++}
++
++// Convert RGB to RGB
++static void RGB2RGB(InputArray _src, OutputArray _dst)
++{
++    ColorConversionHelper<ColorSet<3, 4>, ColorSet<3, 4>, ColorSet<CV_8U, CV_16U, CV_32F>> helper(_src, _dst, 3);
++    RGB2RGB_neon(helper.src.data, helper.dst.data, helper.src.cols * helper.src.rows, helper.srcChannels, 3);
++}
++
++// Convert Gray to BGR using Neon
++static void Gray2BGR_neon(const uchar *src, uchar *dst, int numPixels, int dstChannels)
++{
++    const int vectorSize = 16;
++
++#pragma omp parallel for num_threads(12)
++    for (int i = 0; i <= numPixels - vectorSize; i += vectorSize) {
++        uint8x16_t v_gray = vld1q_u8(src + i);
++        vst3q_u8(dst + i * dstChannels, {v_gray, v_gray, v_gray});
++    }
++
++    src = src + (numPixels / vectorSize) * vectorSize;
++
++    for (int i = (numPixels / vectorSize) * vectorSize; i < numPixels; i++, src++, dst += dstChannels) {
++        dst[0] = dst[1] = dst[2] = src[0];
++    }
++}
++
++// Convert Gray to BGR
++static void Gray2BGR(InputArray _src, OutputArray _dst)
++{
++    ColorConversionHelper<ColorSet<1>, ColorSet<3, 4>, ColorSet<CV_8U, CV_16U, CV_32F>> helper(_src, _dst, 3);
++    Gray2BGR_neon(helper.src.data, helper.dst.data, helper.src.cols * helper.src.rows, 3);
++}
++
++// Convert between color spaces
++static int kcv_cvtColor(InputArray _src, OutputArray _dst, int code, int dstChannels)
++{
++    if (_src.empty()) {
++        return 1;
++    }
++    if (!(_src.type() == CV_8UC3 || ((_src.type() == CV_8UC1) && (code == COLOR_GRAY2BGR)))) {
++        return 2;
++    }
++    bool isSuport = (code == COLOR_BGR2GRAY) || (code == COLOR_GRAY2BGR) || (code == COLOR_RGB2BGR) ||
++        (code == COLOR_BGR2RGB);
++    if (!isSuport) {
++        return 2;
++    }
++    switch (code) {
++        case COLOR_BGR2GRAY:
++        case COLOR_BGRA2GRAY:
++        case COLOR_RGB2GRAY:
++        case COLOR_RGBA2GRAY:
++            BGR2Gray(_src, _dst);
++            break;
++        case COLOR_RGB2BGR:  // case COLOR_BGR2RGB: both are identical, no need to define separately
++            RGB2RGB(_src, _dst);
++            break;
++        case COLOR_GRAY2BGR:
++            Gray2BGR(_src, _dst);
++            break;
++        default:
++            printf("Not support mode");
++    }
++    (void) dstChannels;
++    return 0;
++}
++
+ void cvtColor( InputArray _src, OutputArray _dst, int code, int dcn )
+ {
++
++    int retcode = kcv_cvtColor(_src, _dst, code, dcn);
++    if(retcode == 0 || retcode == 1)
++        return;
+     CV_INSTRUMENT_REGION();
+ 
+     CV_Assert(!_src.empty());
+diff -Naur org/opencv/modules/imgproc/src/imgwarp.cpp opencv/modules/imgproc/src/imgwarp.cpp
+--- org/opencv/modules/imgproc/src/imgwarp.cpp	2026-06-24 12:31:00.331950475 +0800
++++ opencv/modules/imgproc/src/imgwarp.cpp	2026-06-12 14:49:06.244120037 +0800
+@@ -55,7 +55,7 @@
+ #include "opencv2/core/openvx/ovx_defs.hpp"
+ #include "opencv2/core/softfloat.hpp"
+ #include "imgwarp.hpp"
+-
++#include <atomic>
+ using namespace cv;
+ 
+ namespace cv
+@@ -1715,10 +1715,650 @@
+ 
+ }
+ 
++static short _BilinearTab_iC4_buf[INTER_TAB_SIZE2 + 2][2][8];
++static short (*_BilinearTab_iC4)[2][8] = (short (*)[2][8])alignPtr(_BilinearTab_iC4_buf, 16);
++
++template <typename ST, typename DT, int bits>
++struct _FixedPtCast {
++    using type1 = ST;
++    using rtype = DT;
++    enum { SHIFT = bits, DELTA = 1 << (bits - 1) };
++
++    DT operator()(ST val) const
++    {
++        return saturate_cast<DT>((val + DELTA) >> SHIFT);
++    }
++};
++
++using RemapNNFunc = void (*)(
++    const Mat &_src, Mat &_dst, const Mat &_xy, int borderType, const Scalar &_borderValue, const Point &_offset);
++
++using RemapFunc = void (*)(const Mat &_src, Mat &_dst, const Mat &_xy, const Mat &_fxy, const void *_wtab,
++    int borderType, const Scalar &_borderValue, const Point &_offset);
++
++static inline int _clip(int x, int a, int b)
++{
++    return x >= a ? (x < b ? x : b - 1) : a;
++}
++
++template <bool isRelative>
++struct _RemapVec_8u {
++    int operator()(const Mat &_src, void *_dst, const short *XY, const ushort *FXY, const void *_wtab, int width,
++        const Point &_offset) const
++    {
++        int cn = _src.channels();
++        int x = 0;
++        int sstep = (int)_src.step;
++        if ((cn != 1 && cn != 3 && cn != 4) || sstep >= 0x8000) {
++            return 0;
++        }
++
++        const uchar *S0 = _src.ptr();
++        const short *wtab = static_cast<const short *>(_wtab);
++        uchar *D = (uchar *)_dst;
++
++        if (cn == 3) {
++            const int off_y = (isRelative ? (_offset.y) : 0);
++            // version 1.0
++            for (; x <= width - 8; x += 8, D += 24) {
++                int sx0 = XY[x * 2] + (isRelative ? (_offset.x + x) : 0);
++                int sy0 = XY[x * 2 + 1] + off_y;
++                int sx1 = XY[(x + 1) * 2] + (isRelative ? (_offset.x + x + 1) : 0);
++                int sy1 = XY[(x + 1) * 2 + 1] + off_y;
++                int sx2 = XY[(x + 2) * 2] + (isRelative ? (_offset.x + x + 2) : 0);
++                int sy2 = XY[(x + 2) * 2 + 1] + off_y;
++                int sx3 = XY[(x + 3) * 2] + (isRelative ? (_offset.x + x + 3) : 0);
++                int sy3 = XY[(x + 3) * 2 + 1] + off_y;
++                int sx4 = XY[(x + 4) * 2] + (isRelative ? (_offset.x + x + 4) : 0);
++                int sy4 = XY[(x + 4) * 2 + 1] + off_y;
++                int sx5 = XY[(x + 5) * 2] + (isRelative ? (_offset.x + x + 5) : 0);
++                int sy5 = XY[(x + 5) * 2 + 1] + off_y;
++                int sx6 = XY[(x + 6) * 2] + (isRelative ? (_offset.x + x + 6) : 0);
++                int sy6 = XY[(x + 6) * 2 + 1] + off_y;
++                int sx7 = XY[(x + 7) * 2] + (isRelative ? (_offset.x + x + 7) : 0);
++                int sy7 = XY[(x + 7) * 2 + 1] + off_y;
++
++                const uchar *S_0 = S0 + sy0 * sstep + sx0 * 3;
++                const uchar *S_1 = S0 + sy1 * sstep + sx1 * 3;
++                const uchar *S_2 = S0 + sy2 * sstep + sx2 * 3;
++                const uchar *S_3 = S0 + sy3 * sstep + sx3 * 3;
++                const uchar *S_4 = S0 + sy4 * sstep + sx4 * 3;
++                const uchar *S_5 = S0 + sy5 * sstep + sx5 * 3;
++                const uchar *S_6 = S0 + sy6 * sstep + sx6 * 3;
++                const uchar *S_7 = S0 + sy7 * sstep + sx7 * 3;
++
++                const short *w_0 = wtab + FXY[x] * 4;
++                const short *w_1 = wtab + FXY[x + 1] * 4;
++                const short *w_2 = wtab + FXY[x + 2] * 4;
++                const short *w_3 = wtab + FXY[x + 3] * 4;
++                const short *w_4 = wtab + FXY[x + 4] * 4;
++                const short *w_5 = wtab + FXY[x + 5] * 4;
++                const short *w_6 = wtab + FXY[x + 6] * 4;
++                const short *w_7 = wtab + FXY[x + 7] * 4;
++
++                int16x4_t v_S0_low = {S_0[0], S_1[0], S_2[0], S_3[0]};
++                int16x4_t v_S0_high = {S_4[0], S_5[0], S_6[0], S_7[0]};
++                int16x4_t v_S1_low = {S_0[1], S_1[1], S_2[1], S_3[1]};
++                int16x4_t v_S1_high = {S_4[1], S_5[1], S_6[1], S_7[1]};
++                int16x4_t v_S2_low = {S_0[2], S_1[2], S_2[2], S_3[2]};
++                int16x4_t v_S2_high = {S_4[2], S_5[2], S_6[2], S_7[2]};
++                int16x4_t v_S3_low = {S_0[3], S_1[3], S_2[3], S_3[3]};
++                int16x4_t v_S3_high = {S_4[3], S_5[3], S_6[3], S_7[3]};
++                int16x4_t v_S4_low = {S_0[4], S_1[4], S_2[4], S_3[4]};
++                int16x4_t v_S4_high = {S_4[4], S_5[4], S_6[4], S_7[4]};
++                int16x4_t v_S5_low = {S_0[5], S_1[5], S_2[5], S_3[5]};
++                int16x4_t v_S5_high = {S_4[5], S_5[5], S_6[5], S_7[5]};
++
++                int16x4_t v_S_sstep_0_low = {S_0[sstep], S_1[sstep], S_2[sstep], S_3[sstep]};
++                int16x4_t v_S_sstep_0_high = {S_4[sstep], S_5[sstep], S_6[sstep], S_7[sstep]};
++                int16x4_t v_S_sstep_1_low = {S_0[sstep + 1], S_1[sstep + 1], S_2[sstep + 1], S_3[sstep + 1]};
++                int16x4_t v_S_sstep_1_high = {S_4[sstep + 1], S_5[sstep + 1], S_6[sstep + 1], S_7[sstep + 1]};
++                int16x4_t v_S_sstep_2_low = {S_0[sstep + 2], S_1[sstep + 2], S_2[sstep + 2], S_3[sstep + 2]};
++                int16x4_t v_S_sstep_2_high = {S_4[sstep + 2], S_5[sstep + 2], S_6[sstep + 2], S_7[sstep + 2]};
++                int16x4_t v_S_sstep_3_low = {S_0[sstep + 3], S_1[sstep + 3], S_2[sstep + 3], S_3[sstep + 3]};
++                int16x4_t v_S_sstep_3_high = {S_4[sstep + 3], S_5[sstep + 3], S_6[sstep + 3], S_7[sstep + 3]};
++                int16x4_t v_S_sstep_4_low = {S_0[sstep + 4], S_1[sstep + 4], S_2[sstep + 4], S_3[sstep + 4]};
++                int16x4_t v_S_sstep_4_high = {S_4[sstep + 4], S_5[sstep + 4], S_6[sstep + 4], S_7[sstep + 4]};
++                int16x4_t v_S_sstep_5_low = {S_0[sstep + 5], S_1[sstep + 5], S_2[sstep + 5], S_3[sstep + 5]};
++                int16x4_t v_S_sstep_5_high = {S_4[sstep + 5], S_5[sstep + 5], S_6[sstep + 5], S_7[sstep + 5]};
++
++                int16x4_t v_w_0_low = {w_0[0], w_1[0], w_2[0], w_3[0]};
++                int16x4_t v_w_0_high = {w_4[0], w_5[0], w_6[0], w_7[0]};
++                int16x4_t v_w_1_low = {w_0[1], w_1[1], w_2[1], w_3[1]};
++                int16x4_t v_w_1_high = {w_4[1], w_5[1], w_6[1], w_7[1]};
++                int16x4_t v_w_2_low = {w_0[2], w_1[2], w_2[2], w_3[2]};
++                int16x4_t v_w_2_high = {w_4[2], w_5[2], w_6[2], w_7[2]};
++                int16x4_t v_w_3_low = {w_0[3], w_1[3], w_2[3], w_3[3]};
++                int16x4_t v_w_3_high = {w_4[3], w_5[3], w_6[3], w_7[3]};
++
++                int16x4_t t0_low =
++                    vshrn_n_s32(vmlal_s16(vmlal_s16(vmlal_s16(vmull_s16(v_S0_low, v_w_0_low), v_S3_low, v_w_1_low),
++                        v_S_sstep_0_low, v_w_2_low), v_S_sstep_3_low, v_w_3_low),
++                        15);
++                int16x4_t t0_high =
++                    vshrn_n_s32(vmlal_s16(vmlal_s16(vmlal_s16(vmull_s16(v_S0_high, v_w_0_high), v_S3_high, v_w_1_high),
++                        v_S_sstep_0_high, v_w_2_high), v_S_sstep_3_high, v_w_3_high),
++                        15);
++                uint8x8_t t0 = vqmovun_s16(vcombine_s16(t0_low, t0_high));
++
++                int16x4_t t1_low =
++                    vshrn_n_s32(vmlal_s16(vmlal_s16(vmlal_s16(vmull_s16(v_S1_low, v_w_0_low), v_S4_low, v_w_1_low),
++                        v_S_sstep_1_low, v_w_2_low), v_S_sstep_4_low, v_w_3_low),
++                        15);
++                int16x4_t t1_high =
++                    vshrn_n_s32(vmlal_s16(vmlal_s16(vmlal_s16(vmull_s16(v_S1_high, v_w_0_high), v_S4_high, v_w_1_high),
++                        v_S_sstep_1_high, v_w_2_high), v_S_sstep_4_high, v_w_3_high),
++                        15);
++                uint8x8_t t1 = vqmovun_s16(vcombine_s16(t1_low, t1_high));
++
++                int16x4_t t2_low =
++                    vshrn_n_s32(vmlal_s16(vmlal_s16(vmlal_s16(vmull_s16(v_S2_low, v_w_0_low), v_S5_low, v_w_1_low),
++                        v_S_sstep_2_low, v_w_2_low), v_S_sstep_5_low, v_w_3_low),
++                        15);
++                int16x4_t t2_high =
++                    vshrn_n_s32(vmlal_s16(vmlal_s16(vmlal_s16(vmull_s16(v_S2_high, v_w_0_high), v_S5_high, v_w_1_high),
++                        v_S_sstep_2_high, v_w_2_high), v_S_sstep_5_high, v_w_3_high),
++                        15);
++                uint8x8_t t2 = vqmovun_s16(vcombine_s16(t2_low, t2_high));
++
++                uint8x8x3_t t = {t0, t1, t2};
++                vst3_u8(D, t);
++            }
++        }
++        return x;
++    }
++};
++
++template <class CastOp, class VecOp, typename AT, bool isRelative>
++static void _remapBilinear(const Mat &_src, Mat &_dst, const Mat &_xy, const Mat &_fxy, const void *_wtab,
++    int borderType, const Scalar &_borderValue, const Point &_offset)
++{
++    using T = typename CastOp::rtype;
++    using WT = typename CastOp::type1;
++    Size ssize = _src.size();
++    Size dsize = _dst.size();
++    const AT *wtab = static_cast<const AT *>(_wtab);
++    const int cn = _src.channels();
++    const T *S0 = _src.ptr<T>();
++    T cval[CV_CN_MAX];
++    size_t sstep = _src.step / sizeof(S0[0]);
++    VecOp vecOp;
++    CastOp castOp;
++
++    for (int k = 0; k < cn; k++)
++        cval[k] = saturate_cast<T>(_borderValue[k & 3]);
++
++    unsigned width1 = std::max(ssize.width - 1, 0);
++    unsigned height1 = std::max(ssize.height - 1, 0);
++
++    if (_src.type() == CV_8UC3)
++        width1 = std::max(ssize.width - 2, 0);
++
++    for (int dy = 0; dy < dsize.height; dy++) {
++        const short *XY = _xy.ptr<short>(dy);
++        T *D = _dst.ptr<T>(dy);
++        int X0 = 0;
++        const int off_y = (isRelative ? (_offset.y + dy) : 0);
++        bool prevInlier = false;
++        const ushort *FXY = _fxy.ptr<ushort>(dy);
++        for (int dx = 0; dx <= dsize.width; dx++) {
++            bool curInlier = dx < dsize.width ? (unsigned)XY[dx * 2] + (isRelative ? (_offset.x + dx) : 0) < width1 &&
++                                                    (unsigned)XY[dx * 2 + 1] + off_y < height1
++                                              : !prevInlier;
++            if (curInlier == prevInlier)
++                continue;
++            int X1 = dx;
++            prevInlier = curInlier;
++            dx = X0;
++            X0 = X1;
++
++            if (!curInlier) {
++                Point subOffset(_offset.x + dx, _offset.y + dy);
++                int len = vecOp(_src, D, XY + dx * 2, FXY + dx, wtab, X1 - dx, subOffset);
++                dx += len;
++                D += len * cn;
++                if (cn == 3)
++                    for (; dx < X1; dx++, D += 3) {
++                        int sx = XY[dx * 2] + (isRelative ? (_offset.x + dx) : 0);
++                        int sy = XY[dx * 2 + 1] + off_y;
++                        const AT *w = wtab + FXY[dx] * 4;
++                        const T *S = S0 + sy * sstep + sx * 3;
++                        WT t0 = S[0] * w[0] + S[3] * w[1] + S[sstep] * w[2] + S[sstep + 3] * w[3];
++                        WT t1 = S[1] * w[0] + S[4] * w[1] + S[sstep + 1] * w[2] + S[sstep + 4] * w[3];
++                        WT t2 = S[2] * w[0] + S[5] * w[1] + S[sstep + 2] * w[2] + S[sstep + 5] * w[3];
++                        D[0] = castOp(t0);
++                        D[1] = castOp(t1);
++                        D[2] = castOp(t2);
++                    }
++            } else {
++                if (cn == 3) {
++                    for (; dx < X1; dx++, D += cn) {
++                        int sx = XY[dx * 2] + (isRelative ? (_offset.x + dx) : 0);
++                        int sy = XY[dx * 2 + 1] + off_y;
++                        if (borderType == BORDER_CONSTANT &&
++                            (sx >= ssize.width || sx + 1 < 0 || sy >= ssize.height || sy + 1 < 0)) {
++                            for (int k = 0; k < cn; k++)
++                                D[k] = cval[k];
++                        } else {
++                            int sx0;
++                            int sx1;
++                            int sy0;
++                            int sy1;
++                            const T *v0;
++                            const T *v1;
++                            const T *v2;
++                            const T *v3;
++                            const AT *w = wtab + FXY[dx] * 4;
++
++                            sx0 = borderInterpolate(sx, ssize.width, borderType);
++                            sy0 = borderInterpolate(sy, ssize.height, borderType);
++                            sx1 = borderInterpolate(sx + 1, ssize.width, borderType);
++                            sy1 = borderInterpolate(sy + 1, ssize.height, borderType);
++                            v3 = sx1 >= 0 && sy1 >= 0 ? S0 + sy1 * sstep + sx1 * cn : &cval[0];
++                            v2 = sx0 >= 0 && sy1 >= 0 ? S0 + sy1 * sstep + sx0 * cn : &cval[0];
++                            v1 = sx1 >= 0 && sy0 >= 0 ? S0 + sy0 * sstep + sx1 * cn : &cval[0];
++                            v0 = sx0 >= 0 && sy0 >= 0 ? S0 + sy0 * sstep + sx0 * cn : &cval[0];
++                            for (int k = 0; k < cn; k++)
++                                D[k] = castOp(WT(w[0] * v0[k] + v1[k] * w[1] + v2[k] * w[2] + v3[k] * w[3]));
++                        }
++                    }
++                }
++            }
++        }
++    }
++}
++
++class _RemapInvoker : public ParallelLoopBody {
++public:
++    _RemapInvoker(const Mat &_src, Mat &_dst, const Mat *_m1, const Mat *_m2, int _borderType,
++        const Scalar &_borderValue, int _planarInput, RemapNNFunc _nnfunc, RemapFunc _ifunc, const void *_ctab)
++        : ParallelLoopBody(), src(&_src), dst(&_dst), m1(_m1), m2(_m2), borderType(_borderType),
++          borderValue(_borderValue), planarInput(_planarInput), nnfunc(_nnfunc), ifunc(_ifunc), ctab(_ctab)
++    {}
++
++    virtual void operator()(const Range &range) const CV_OVERRIDE
++    {
++        int x, y, x1, y1;
++        const int buf_size = 1 << 14;
++        int browsT = std::min(128, dst->rows);
++        int bcols0 = std::min(buf_size / browsT, dst->cols);
++        browsT = std::min(buf_size / bcols0, dst->rows);
++
++        Mat _bufxy(browsT, bcols0, CV_16SC2), _bufa;
++        if (!nnfunc)
++            _bufa.create(browsT, bcols0, CV_16UC1);
++
++        for (y = range.start; y < range.end; y += browsT) {
++            for (x = 0; x < dst->cols; x += bcols0) {
++                int bcols = std::min(bcols0, dst->cols - x);
++                int brows = std::min(browsT, range.end - y);
++                Mat bufa(_bufa, Rect(0, 0, bcols, brows));
++                Mat bufxy(_bufxy, Rect(0, 0, bcols, brows));
++                Mat dpart(*dst, Rect(x, y, bcols, brows));
++
++                for (y1 = 0; y1 < brows; y1++) {
++                    ushort *A = bufa.ptr<ushort>(y1);
++                    short *XY = bufxy.ptr<short>(y1);
++
++                    if (planarInput) {
++                        const float *sY = m2->ptr<float>(y + y1) + x;
++                        const float *sX = m1->ptr<float>(y + y1) + x;
++
++                        x1 = 0;
++                        const int INTER_TAB_MASK = INTER_TAB_SIZE - 1;
++                        float32x4_t v_inter_tab_size_f = vdupq_n_f32((float)INTER_TAB_SIZE);
++                        int32x4_t v_inter_tab_mask = vdupq_n_s32(INTER_TAB_MASK);
++                        int32x4_t v_inter_tab_size = vdupq_n_s32(INTER_TAB_SIZE);
++                        for (; x1 <= bcols - 8; x1 += 8) {
++                            __builtin_prefetch(&sX[x1 + 8], 0, 1);
++                            __builtin_prefetch(&sY[x1 + 8], 0, 1);
++                            float32x4_t sx_f1 = vld1q_f32(&sX[x1]);
++                            float32x4_t sy_f1 = vld1q_f32(&sY[x1]);
++                            float32x4_t sx_f2 = vld1q_f32(&sX[x1 + 4]);
++                            float32x4_t sy_f2 = vld1q_f32(&sY[x1 + 4]);
++                            int32x4_t sx1 = vcvtq_s32_f32(vmulq_f32(sx_f1, v_inter_tab_size_f));
++                            int32x4_t sy1 = vcvtq_s32_f32(vmulq_f32(sy_f1, v_inter_tab_size_f));
++                            int32x4_t sx2 = vcvtq_s32_f32(vmulq_f32(sx_f2, v_inter_tab_size_f));
++                            int32x4_t sy2 = vcvtq_s32_f32(vmulq_f32(sy_f2, v_inter_tab_size_f));
++                            int32x4_t v_sy1 = vandq_s32(sy1, v_inter_tab_mask);
++                            int32x4_t v_sx1 = vandq_s32(sx1, v_inter_tab_mask);
++                            int32x4_t v1 = vmlaq_s32(v_sx1, v_sy1, v_inter_tab_size);
++                            int32x4_t v_sy2 = vandq_s32(sy2, v_inter_tab_mask);
++                            int32x4_t v_sx2 = vandq_s32(sx2, v_inter_tab_mask);
++                            int32x4_t v2 = vmlaq_s32(v_sx2, v_sy2, v_inter_tab_size);
++                            int16x4_t sx_shifted1 = vqshrn_n_s32(sx1, INTER_BITS);
++                            int16x4_t sy_shifted1 = vqshrn_n_s32(sy1, INTER_BITS);
++                            int16x4_t sx_shifted2 = vqshrn_n_s32(sx2, INTER_BITS);
++                            int16x4_t sy_shifted2 = vqshrn_n_s32(sy2, INTER_BITS);
++                            vst2_s16(&XY[x1 * 2], {sx_shifted1, sy_shifted1});
++                            vst1_u16(&A[x1], vqmovn_u32(vreinterpretq_u32_s32(v1)));
++                            vst2_s16(&XY[(x1 + 4) * 2], {sx_shifted2, sy_shifted2});
++                            vst1_u16(&A[x1 + 4], vqmovn_u32(vreinterpretq_u32_s32(v2)));
++                        }
++                        for (; x1 < bcols; x1++) {
++                            int sy = cvRound(sY[x1] * INTER_TAB_SIZE);
++                            int sx = cvRound(sX[x1] * INTER_TAB_SIZE);
++                            XY[x1 * 2] = saturate_cast<short>(sx >> INTER_BITS);
++                            XY[x1 * 2 + 1] = saturate_cast<short>(sy >> INTER_BITS);
++                            int v = (sy & (INTER_TAB_SIZE - 1)) * INTER_TAB_SIZE + (sx & (INTER_TAB_SIZE - 1));
++                            A[x1] = (ushort)v;
++                        }
++                    }
++                }
++                // Invoke the calculation function.
++                ifunc(*src, dpart, bufxy, bufa, ctab, borderType, borderValue, Point(x, y));
++            }
++        }
++    }
++
++private:
++    const Mat *src;
++    Mat *dst;
++    const Mat *m1, *m2;
++    int borderType; // 边界类型
++    Scalar borderValue;
++    int planarInput; // 是否为平面输入
++    RemapNNFunc nnfunc;
++    RemapFunc ifunc;
++    const void *ctab;
++};
++
++static inline void _interpolateLinear(float x, float *coeffs)
++{
++    coeffs[0] = 1.f - x;
++    coeffs[1] = x;
++}
++
++static void _initInterTab1D(int method, float *tab, int tabsz)
++{
++    float scale = 1.f / tabsz;
++    if (method == INTER_LINEAR) {
++        for (int i = 0; i < tabsz; i++, tab += 2) {
++            _interpolateLinear(i * scale, tab);
++        }
++    }
++}
++
++static const void *_initInterTab2D(int method, bool fixpt)
++{
++    static float BilinearTab_f[INTER_TAB_SIZE2][2][2];
++    static short BilinearTab_i[INTER_TAB_SIZE2][2][2];
++    const int INTER_REMAP_COEF_BITS = 15;
++    const int INTER_REMAP_COEF_SCALE = 1 << INTER_REMAP_COEF_BITS;
++    static bool inittab[INTER_MAX + 1] = {false};
++    int ksize = 0;
++    float *tab = nullptr;
++    short *itab = nullptr;
++
++    tab = BilinearTab_f[0][0], itab = BilinearTab_i[0][0], ksize = 2;
++
++    if (!inittab[method]) {
++        AutoBuffer<float> _tab(8 * INTER_TAB_SIZE);
++        int i;
++        int j;
++        int q1;
++        int q2;
++        _initInterTab1D(method, _tab.data(), INTER_TAB_SIZE);
++        for (i = 0; i < INTER_TAB_SIZE; i++)
++            for (j = 0; j < INTER_TAB_SIZE; j++, tab += ksize * ksize, itab += ksize * ksize) {
++                int isum = 0;
++
++                for (q1 = 0; q1 < ksize; q1++) {
++                    float vy = _tab[i * ksize + q1];
++                    for (q2 = 0; q2 < ksize; q2++) {
++                        float v = vy * _tab[j * ksize + q2];
++                        tab[q1 * ksize + q2] = v;
++                        isum += itab[q1 * ksize + q2] = saturate_cast<short>(v * INTER_REMAP_COEF_SCALE);
++                    }
++                }
++
++                if (isum != INTER_REMAP_COEF_SCALE) {
++                    int diff = isum - INTER_REMAP_COEF_SCALE;
++                    int ksize2 = ksize / 2;
++                    int Mk1 = ksize2;
++                    int Mk2 = ksize2;
++                    int mk1 = ksize2;
++                    int mk2 = ksize2;
++                    for (q1 = ksize2; q1 < ksize2 + 2; q1++)
++                        for (q2 = ksize2; q2 < ksize2 + 2; q2++) {
++                            if (itab[q1 * ksize + q2] < itab[mk1 * ksize + mk2])
++                                mk1 = q1, mk2 = q2;
++                            else if (itab[q1 * ksize + q2] > itab[Mk1 * ksize + Mk2])
++                                Mk1 = q1, Mk2 = q2;
++                        }
++                    itab[Mk1 * ksize + Mk2] = (short)(itab[Mk1 * ksize + Mk2] - diff);
++                }
++            }
++        tab -= INTER_TAB_SIZE2 * ksize * ksize;
++        itab -= INTER_TAB_SIZE2 * ksize * ksize;
++        if (method == INTER_LINEAR) {
++            for (i = 0; i < INTER_TAB_SIZE2; i++)
++                for (j = 0; j < 4; j++) {
++                    _BilinearTab_iC4[i][0][j * 2] = BilinearTab_i[i][0][0];
++                    _BilinearTab_iC4[i][0][j * 2 + 1] = BilinearTab_i[i][0][1];
++                    _BilinearTab_iC4[i][1][j * 2] = BilinearTab_i[i][1][0];
++                    _BilinearTab_iC4[i][1][j * 2 + 1] = BilinearTab_i[i][1][1];
++                }
++        }
++        inittab[method] = true;
++    }
++    return fixpt ? static_cast<const void *>(itab) : static_cast<const void *>(tab);
++}
++
++namespace cv {
++
++ParallelLoopBody::~ParallelLoopBody()
++{}
++
++namespace {
++class ParallelLoopBodyWrapperContext {
++public:
++    ParallelLoopBodyWrapperContext(const cv::ParallelLoopBody &_body, const cv::Range &rx, double nps)
++        : isRngUsed(false), hasException(false)
++    {
++        whRge = rx;
++        body = &_body;
++        double len = whRge.end - whRge.start;
++        nstripes = cvRound(nps <= 0 ? len : MIN(MAX(nps, 1.), len));
++        rng = cv::theRNG();
++    }
++    void finalize()
++    {
++        if (isRngUsed) {
++            cv::theRNG() = rng;
++            cv::theRNG().next();
++        }
++    }
++    ~ParallelLoopBodyWrapperContext()
++    {}
++    const cv::ParallelLoopBody *body;
++    cv::RNG rng;
++    cv::Range whRge;
++    mutable bool isRngUsed;
++    bool hasException;
++    int nstripes;
++    cv::String excep_msg;
++    void rcdExcept(const cv::String &msg)
++    {
++        (void)msg;
++#ifndef CV_THREAD_SANITIZER
++#endif
++    }
++private:
++    ParallelLoopBodyWrapperContext(const ParallelLoopBodyWrapperContext &);
++    ParallelLoopBodyWrapperContext &operator=(const ParallelLoopBodyWrapperContext &);
++};
++
++class ParallelLoopBodyWrapper : public cv::ParallelLoopBody {
++public:
++    explicit ParallelLoopBodyWrapper(ParallelLoopBodyWrapperContext &ctx_) : context(ctx_)
++    {}
++    ~ParallelLoopBodyWrapper()
++    {}
++    void operator()(const cv::Range &sr) const CV_OVERRIDE
++    {
++        cv::theRNG() = context.rng;
++
++        cv::Range r;
++        cv::Range whRge = context.whRge;
++        int nstripes = context.nstripes;
++        r.start = (int)(whRge.start +
++                        ((uint64)sr.start * (whRge.end - whRge.start) + nstripes / 2) / nstripes);
++        r.end = sr.end >= nstripes
++                    ? whRge.end
++                    : (int)(whRge.start +
++                            ((uint64)sr.end * (whRge.end - whRge.start) + nstripes / 2) / nstripes);
++        try {
++            (*context.body)(r);
++        }
++
++        catch (const cv::Exception &e) {
++            context.rcdExcept(e.what());
++        } catch (const std::exception &e) {
++            context.rcdExcept(e.what());
++        } catch (...) {
++            context.rcdExcept("Unknown exception message");
++        }
++    }
++    cv::Range stripeRange() const
++    {
++        return cv::Range(0, context.nstripes);
++    }
++
++protected:
++    ParallelLoopBodyWrapperContext &context;
++};
++using ProxyLoopBody = ParallelLoopBodyWrapper;
++}  // namespace
++
++/* ================================   parallel_for_  ================================ */
++
++static void kcv_parallel_for_impl(
++    const cv::Range &range, const cv::ParallelLoopBody &body, double nstripes, int nthreads);  // forward declaration
++static void kcv_parallel_for(const cv::Range &range, const cv::ParallelLoopBody &body, double nstripes, int nthreads)
++{
++    if (range.empty()) {
++        return;
++    }
++    static std::atomic<bool> flagNestedParallelFor(false);
++    bool nNesReg = !flagNestedParallelFor.load();
++    if (nNesReg) {
++        nNesReg = !flagNestedParallelFor.exchange(true);
++    }
++    if (nNesReg) {
++        try {
++            kcv_parallel_for_impl(range, body, nstripes, nthreads);
++            flagNestedParallelFor = false;
++        } catch (...) {
++            flagNestedParallelFor = false;
++            throw;
++        }
++    } else {
++        CV_UNUSED(nstripes);
++        body(range);
++    }
++}
++
++static void kcv_parallel_for_impl(
++    const cv::Range &range, const cv::ParallelLoopBody &body, double nstripes, int nthreads)
++{
++
++
++    if ((nthreads < 0 || nthreads > 1) && range.end - range.start > 1) {
++        ParallelLoopBodyWrapperContext context(body, range, nstripes);
++        ProxyLoopBody pbody(context);
++        cv::Range stripeRange = pbody.stripeRange();
++        if (stripeRange.end - stripeRange.start == 1) {
++            body(range);
++            return;
++        }
++
++#pragma omp parallel for schedule(dynamic) num_threads(std::abs(nthreads))
++        for (int i = stripeRange.start; i < stripeRange.end; ++i)
++            pbody(Range(i, i + 1));
++
++        context.finalize();  // propagate exceptions if exists
++        return;
++    }
++
++    body(range);
++}
++}  // namespace cv
++
++static int kcv_remap(InputArray _src, OutputArray _dst, InputArray _map1, InputArray _map2, int interpolation, int borderType,
++    const Scalar &borderValue)
++{
++    if (_src.empty()) {
++        return 1;
++    }
++    if (_map1.empty()) {
++        return 1;
++    }
++    if (!(_map2.empty() || (_map2.size() == _map1.size()))) {
++        return 1;
++    }
++    if (!((_map1.type() == CV_32F) && (_map2.type() == CV_32F))) {
++        return 2;
++    }
++    if (borderType != BORDER_CONSTANT) {
++        return 2;
++    }
++    if (!((_src.type() == CV_8UC3) && (interpolation == 1))) {
++        return 2;
++    }
++    const int WARP_RELATIVE_MAP = 32;
++    const bool hasRelativeFlag = ((interpolation & WARP_RELATIVE_MAP) != 0);
++    const int INTER_REMAP_COEF_BITS1 = 15;
++    static RemapFunc linear_tab[2][8] = {{
++        _remapBilinear<_FixedPtCast<int, uchar, INTER_REMAP_COEF_BITS1>, _RemapVec_8u<false>, short, false>,
++        0,
++    }};
++
++    Mat src = _src.getMat();
++    Mat map1 = _map1.getMat();
++    Mat map2 = _map2.getMat();
++    if (!(((map1.type() == CV_32FC2 || map1.type() == CV_16SC2) && map2.empty()) ||
++            (map1.type() == CV_32FC1 && map2.type() == CV_32FC1))) {
++        return 1;
++    }
++    _dst.create(map1.size(), src.type());
++    Mat dst = _dst.getMat();
++    if (dst.data == src.data)
++        src = src.clone();
++
++    interpolation &= ~WARP_RELATIVE_MAP;
++    if (interpolation == INTER_AREA)
++        interpolation = INTER_LINEAR;
++
++    int type = src.type();
++    int depth = CV_MAT_DEPTH(type);
++    RemapFunc ifunc = nullptr;
++    const void *ctab = nullptr;
++    bool fixpt = depth == CV_8U;
++    bool planarInput = false;
++
++    const int relativeOptionIndex = (hasRelativeFlag ? 1 : 0);
++
++    ifunc = linear_tab[relativeOptionIndex][depth];
++
++    ctab = _initInterTab2D(interpolation, fixpt);
++
++    const Mat *m1 = &map1;
++    const Mat *m2 = &map2;
++    planarInput = map1.channels() == 1;
++    _RemapInvoker invoker(src, dst, m1, m2, borderType, borderValue, planarInput, nullptr, ifunc, ctab);
++    kcv_parallel_for(Range(0, dst.rows), invoker, dst.total() / (double)(1 << 15), 32);
++    return 0;
++}
++
+ void cv::remap( InputArray _src, OutputArray _dst,
+                 InputArray _map1, InputArray _map2,
+                 int interpolation, int borderType, const Scalar& borderValue )
+ {
++
++    int retcode = kcv_remap( _src, _dst, _map1, _map2, interpolation, borderType, borderValue );
++    if(retcode == 0 || retcode == 1)
++        return;
+     CV_INSTRUMENT_REGION();
+ 
+     const bool hasRelativeFlag = ((interpolation & WARP_RELATIVE_MAP) != 0);
+@@ -2799,11 +3439,161 @@
+ } // hal::
+ } // cv::
+ 
++namespace {
++inline int32x4_t neon_round(const float32x4_t &a)
++{
++    int32x4_t result = vcvtnq_s32_f32(a);
++    __asm__("fcvtns %0.4s, %1.4s" : "=w"(result) : "w"(a) :);
++    return result;
++}
++
++}  // namespace
++namespace cv {
++// 使用opencv的invertAffineTransform实现。
++static inline void invertAffineTransform1(InputArray _matM, OutputArray iM)
++{
++    Mat matM = _matM.getMat();
++    iM.create(2, 3, matM.type()); // 2 3
++    Mat _iM = iM.getMat();
++
++    if (matM.type() == CV_32F) {
++        const softfloat *M = matM.ptr<softfloat>();
++        softfloat *iM_data = _iM.ptr<softfloat>();
++        int step = (int)(matM.step / sizeof(M[0]));
++        int istep = (int)(_iM.step / sizeof(iM_data[0]));
++
++        softdouble D = M[0] * M[step + 1] - M[1] * M[step];
++        D = D != 0. ? softdouble(1.) / D : softdouble(0.); // 0 0. 1 1.
++        softdouble A11 = M[step + 1] * D;
++        softdouble A22 = M[0] * D;
++        softdouble A12 = -M[1] * D;
++        softdouble A21 = -M[step] * D;
++        softdouble b1 = -A11 * M[2] - A12 * M[step + 2];
++        softdouble b2 = -A21 * M[2] - A22 * M[step + 2];
++
++        iM_data[0] = A11;
++        iM_data[1] = A12;
++        iM_data[2] = b1; // 2
++        iM_data[istep] = A21;
++        iM_data[istep + 1] = A22;
++        iM_data[istep + 2] = b2; // 2
++    }
++}
++
++static inline void handleRow(Vec3b *dst_row, int32x4_t v_sx, int32x4_t v_sy, const Mat &src, const Scalar &borderVal)
++{
++    // vgetq_lane_s32的参数只能是常数，无法使用循环。
++    int sx0 = vgetq_lane_s32(v_sx, 0);
++    int sy0 = vgetq_lane_s32(v_sy, 0);
++    int sx1 = vgetq_lane_s32(v_sx, 1);
++    int sy1 = vgetq_lane_s32(v_sy, 1);
++    int sx2 = vgetq_lane_s32(v_sx, 2);
++    int sy2 = vgetq_lane_s32(v_sy, 2);
++    int sx3 = vgetq_lane_s32(v_sx, 3);
++    int sy3 = vgetq_lane_s32(v_sy, 3);
++    constexpr int j = 0;
++    if (static_cast<unsigned>(sx0) < static_cast<unsigned>(src.rows) &&
++        static_cast<unsigned>(sy0) < static_cast<unsigned>(src.cols)) {
++        dst_row[j] = src.at<cv::Vec3b>(sx0, sy0);
++    } else {
++        dst_row[j] = cv::Vec3b(static_cast<uchar>(borderVal[0]),
++            static_cast<uchar>(borderVal[1]),
++            static_cast<uchar>(borderVal[2]));  // 2
++    }
++    if (static_cast<unsigned>(sx1) < static_cast<unsigned>(src.rows) &&
++        static_cast<unsigned>(sy1) < static_cast<unsigned>(src.cols)) {
++        dst_row[j + 1] = src.at<cv::Vec3b>(sx1, sy1);
++    } else {
++        dst_row[j + 1] = cv::Vec3b(static_cast<uchar>(borderVal[0]),
++            static_cast<uchar>(borderVal[1]),
++            static_cast<uchar>(borderVal[2]));  // 2
++    }
++    if (static_cast<unsigned>(sx2) < static_cast<unsigned>(src.rows) &&
++        static_cast<unsigned>(sy2) < static_cast<unsigned>(src.cols)) {
++        dst_row[j + 2] = src.at<cv::Vec3b>(sx2, sy2);  // 2
++    } else {
++        dst_row[j + 2] = cv::Vec3b(static_cast<uchar>(borderVal[0]),  // 2
++            static_cast<uchar>(borderVal[1]),
++            static_cast<uchar>(borderVal[2]));  // 2
++    }
++    if (static_cast<unsigned>(sx3) < static_cast<unsigned>(src.rows) &&
++        static_cast<unsigned>(sy3) < static_cast<unsigned>(src.cols)) {
++        dst_row[j + 3] = src.at<cv::Vec3b>(sx3, sy3);  // 3
++    } else {
++        dst_row[j + 3] = cv::Vec3b(static_cast<uchar>(borderVal[0]),  // 3
++            static_cast<uchar>(borderVal[1]),
++            static_cast<uchar>(borderVal[2]));  // 2
++    }
++}
++
++static inline void warpAffine_neon(Mat src, Mat dst, Mat M, Size ds, cv::Scalar borderVal)
++{
++    Mat M_inv;
++    invertAffineTransform1(M, M_inv);
++    float32x4_t v_m_inv_00 = vdupq_n_f32(M_inv.at<float>(0, 0));
++    float32x4_t v_m_inv_01 = vdupq_n_f32(M_inv.at<float>(0, 1));
++    float32x4_t v_m_inv_02 = vdupq_n_f32(M_inv.at<float>(0, 2));
++    float32x4_t v_m_inv_10 = vdupq_n_f32(M_inv.at<float>(1, 0));
++    float32x4_t v_m_inv_11 = vdupq_n_f32(M_inv.at<float>(1, 1));
++    float32x4_t v_m_inv_12 = vdupq_n_f32(M_inv.at<float>(1, 2));
++    float32x4_t v_j_offset = {0.0f, 1.0f, 2.0f, 3.0f};
++#pragma omp parallel for num_threads(26) schedule(dynamic)
++    for (int i = 0; i < ds.height; i++) {
++        Vec3b *dst_row = dst.ptr<Vec3b>(i);
++        float32x4_t v_i = vdupq_n_f32(static_cast<float>(i));
++        int j = 0;
++        for (j = 0; j <= ds.width - 4; j += 4) { // 4
++            float32x4_t v_j = vaddq_f32(vdupq_n_f32(static_cast<float>(j)), v_j_offset);
++            float32x4_t v_y = vmlaq_f32(v_m_inv_02, v_m_inv_01, v_i);
++            float32x4_t v_x = vmlaq_f32(v_m_inv_12, v_m_inv_11, v_i);
++            v_y = vmlaq_f32(v_y, v_m_inv_00, v_j);
++            v_x = vmlaq_f32(v_x, v_m_inv_10, v_j);
++            int32x4_t v_sx = neon_round(v_x);
++            int32x4_t v_sy = neon_round(v_y);
++            asm volatile("PRFM pstl1strm, [%0]" : : "r"((uchar *)(dst_row + j + 64)));
++            handleRow(dst_row + j, v_sx, v_sy, src, borderVal);
++        }
++        for (; j < ds.width; j++) {
++            int sx = cvRound(M_inv.at<float>(1, 0) * j + M_inv.at<float>(1, 1) * i + M_inv.at<float>(1, 2));
++            int sy = cvRound(M_inv.at<float>(0, 0) * j + M_inv.at<float>(0, 1) * i + M_inv.at<float>(0, 2));
++            if (static_cast<unsigned>(sx) < static_cast<unsigned>(src.rows) &&
++                static_cast<unsigned>(sy) < static_cast<unsigned>(src.cols)) {
++                dst.at<cv::Vec3b>(i, j) = src.at<cv::Vec3b>(sx, sy);
++            } else {
++                dst.at<cv::Vec3b>(i, j) = cv::Vec3b(static_cast<uchar>(borderVal[0]),
++                    static_cast<uchar>(borderVal[1]),
++                    static_cast<uchar>(borderVal[2])); // 2
++            }
++        }
++    }
++}
++
++static int kcv_warpAffine(
++    InputArray _src, OutputArray _dst, InputArray M0, Size dsize, int flags, int borderType, const Scalar &borderValue)
++{
++    if (_src.empty()) {
++        return 1;
++    }
++    if (_src.type() != CV_8UC3 || flags != 0 ||borderType != BORDER_CONSTANT) {
++        return 2;
++    }
++    Mat src = _src.getMat();
++    Mat M = M0.getMat();
++    _dst.create(dsize.empty() ? src.size() : dsize, src.type());
++    Mat dst = _dst.getMat();
++    warpAffine_neon(src, dst, M, dsize, borderValue);
++
++    return 0;
++}
++}  // namespace cv
+ 
+ void cv::warpAffine( InputArray _src, OutputArray _dst,
+                      InputArray _M0, Size dsize,
+                      int flags, int borderType, const Scalar& borderValue )
+ {
++    int retcode = kcv_warpAffine(_src, _dst, _M0, dsize, flags, cv::BORDER_CONSTANT, borderValue);
++    if(retcode == 0 || retcode == 1)
++        return;
+     CV_INSTRUMENT_REGION();
+ 
+     int interpolation = flags & INTER_MAX;
+diff -Naur org/opencv/modules/imgproc/src/morph.dispatch.cpp opencv/modules/imgproc/src/morph.dispatch.cpp
+--- org/opencv/modules/imgproc/src/morph.dispatch.cpp	2026-06-24 12:31:00.331950475 +0800
++++ opencv/modules/imgproc/src/morph.dispatch.cpp	2026-06-16 11:38:58.142160550 +0800
+@@ -1098,11 +1098,159 @@
+     morphOp( MORPH_ERODE, src, dst, kernel, anchor, iterations, borderType, borderValue );
+ }
+ 
++static uchar mGetPixel(const Mat &src, int x, int y, int borderType, uchar borderValue)
++{
++    int rows = src.rows;
++    int cols = src.cols;
++    int cn = src.channels();
++    if (x < 0 || y < 0 || x >= rows || y >= cols * cn) {
++        if (borderType == 0) {  // Border constant
++            return borderValue;
++        } else if (borderType == 1) {  // Border replicate
++            x = std::min(std::max(x, 0), rows - 1);
++            y = std::min(std::max(y, 0), cols * cn - 1);
++        }
++    }
++    return src.data[x * cols * cn + y];
++}
++
++static void dilate_common(
++    const Mat &_src, Mat &_dst, Mat &kernel, Point anchor, int borderType, uchar borderValue)
++{
++    int height = _src.rows;
++    int width = _src.cols;
++    const int kRows = kernel.rows;
++    const int kCols = kernel.cols;
++    const int cn = _src.channels();
++    if (anchor.x == -1 && anchor.y == -1) {
++        anchor = Point(kCols / 2, kRows / 2);  // 2 计算核中心位置
++    }
++    uchar *src = _src.data;
++    uchar *dst = _dst.data;
++    int tmpwidth = width * cn;
++#pragma omp parallel for schedule(auto) num_threads(32)
++    for (int i = 0; i < height; i++) {
++        int j = 0;
++        int tmp = i * tmpwidth;
++        if (j == 0) {  // 左边界
++            for (int k = 0; k < 16; k++) {  // 16 一次处理16个数据
++                uchar maxVal = 0;
++                for (int ki = 0; ki < kRows; ki++) {
++                    for (int kj = 0; kj < kCols; kj++) {
++                        if (kernel.data[ki * kCols + kj] == 1) {
++                            int xi = i + ki - anchor.x;
++                            int yj = j + k + (kj - anchor.y) * cn;
++                            if ((xi < 0) || (yj < 0) || (xi >= height) || (yj >= tmpwidth)) {
++                                maxVal = max(maxVal, borderValue);
++                            } else {
++                                maxVal = max(maxVal, src[xi * tmpwidth + yj]);
++                            }
++                            maxVal = max(maxVal, mGetPixel(_src, xi, yj, 0, 0));
++                        }
++                    }
++                }
++                dst[tmp + j + k] = maxVal;
++            }
++        }
++        for (j = 16; j < tmpwidth - 16; j += 16) {  // 16 一次加载16个数据
++            int idx = tmp + j;
++            uint8x16_t current = vld1q_u8(&src[idx]);
++                for (int ki = 0; ki < kRows; ki++) {
++                    for (int kj = 0; kj < kCols; kj++) {
++                        if (kernel.data[ki * kCols + kj] == 1) {
++                            int xi = i + ki - anchor.x;
++                            int yj = j + (kj - anchor.y) * cn;
++                            int tmpidx = xi * tmpwidth + yj;
++                            if (xi < 0 || yj < 0 || xi >= height || yj + 16 > tmpwidth) {  // 16 边界判断
++                            } else {
++                                current = vmaxq_u8(current, vld1q_u8(&src[tmpidx]));
++                            }
++                        }
++                    }
++                }
++                vst1q_u8(&dst[idx], current);
++        }
++        if (j == tmpwidth - 16) {  // 16 右边界
++            for (int k = 0; k < 16; k++) {  // 16 一次处理16个数据
++                uchar maxVal = 0;
++                for (int ki = 0; ki < kRows; ki++) {
++                    for (int kj = 0; kj < kCols; kj++) {
++                        if (kernel.data[ki * kCols + kj] == 1) {
++                            int xi = i + ki - anchor.x;
++                            int yj = j + k + (kj - anchor.y) * cn;
++                            if ((xi < 0) || (yj < 0) || (xi >= height) || (yj >= tmpwidth)) {
++                                maxVal = max(maxVal, borderValue);
++                            } else {
++                                maxVal = max(maxVal, src[xi * tmpwidth + yj]);
++                            }
++                            maxVal = max(maxVal, mGetPixel(_src, xi, yj, 0, 0));
++                        }
++                    }
++                }
++                dst[tmp + j + k] = maxVal;
++            }
++        }
++        for (; j < tmpwidth; j++) {  // 剩余部分
++            uchar maxVal = 0;
++            for (int ki = 0; ki < kRows; ki++) {
++                for (int kj = 0; kj < kCols; kj++) {
++                    if (kernel.data[ki * kCols + kj] == 1) {
++                        int xi = i + ki - anchor.x;
++                        int yj = j + (kj - anchor.y) * cn;
++                        maxVal = max(maxVal, mGetPixel(_src, xi, yj, borderType, borderValue));
++                    }
++                }
++            }
++            _dst.data[tmp + j] = maxVal;
++        }
++    }
++}
++
++static int kcv_dilate(InputArray _src, OutputArray _dst, InputArray kernel, Point anchor, int iterations, int borderType,
++    const Scalar &borderValue)
++{
++    if (_src.empty()) {
++        return 1;
++    }
++    if (!(_src.type() == CV_8UC3 || _src.type() == CV_8UC1)) {
++        return 2;
++    }
++    if ( borderType != BORDER_CONSTANT) {
++        return 2;
++    }
++
++    Mat srcMat = _src.getMat();
++
++    _dst.create(srcMat.size(), srcMat.type());
++    Mat dstMat = _dst.getMat();
++    Mat kernelMat = kernel.getMat();
++
++    if (iterations == 1) {
++        dilate_common(srcMat, dstMat, kernelMat, anchor, borderType, static_cast<uchar>(borderValue[0]));
++        return 0;
++    }
++    Mat tmp(srcMat.size(), srcMat.type());
++    std::stack<Mat> mStack;
++    dilate_common(srcMat, tmp, kernelMat, anchor, borderType, static_cast<uchar>(borderValue[0]));
++    mStack.push(tmp);
++    for (int i = 1; i < iterations; i++) {
++        Mat a = mStack.top();
++        mStack.pop();
++        Mat b = i == (iterations - 1)?dstMat:Mat(srcMat.size(), srcMat.type());
++        dilate_common(a, b, kernelMat, anchor, borderType, static_cast<uchar>(borderValue[0]));
++        mStack.push(b);
++    }
++    return 0;
++}
+ 
+ void dilate( InputArray src, OutputArray dst, InputArray kernel,
+                  Point anchor, int iterations,
+                  int borderType, const Scalar& borderValue )
+ {
++    int retcode = kcv_dilate(src, dst, kernel, anchor, iterations, borderType, borderValue);
++    if (retcode == 0 || retcode == 1) {
++        return;
++    }
+     CV_INSTRUMENT_REGION();
+ 
+     CV_Assert(!src.empty());
+@@ -1240,10 +1388,50 @@
+ #endif
+ #endif
+ 
++static int kcv_morphologyEx(InputArray _src, OutputArray _dst, int op, InputArray _kernel, Point anchor, int iterations,
++    int borderType = BORDER_CONSTANT, const Scalar &borderValue = 0)
++{
++    if (_src.empty()) {
++        return 1;
++    }
++    if (!(_src.type() == CV_8UC3 || _src.type() == CV_8UC1)) {
++        return 2;
++    }
++    if (borderType != BORDER_CONSTANT) {
++        return 2;
++    }
++    Mat src = _src.getMat();
++    _dst.create(src.size(), src.type());
++    Mat dst = _dst.getMat();
++    Mat tmp(src.size(), src.type());
++    switch (op) {
++        case MORPH_ERODE:
++            kcv_erode(src, dst, _kernel, anchor, iterations, borderType, borderValue);
++            break;
++        case MORPH_DILATE:
++            kcv_dilate(src, dst, _kernel, anchor, iterations, borderType, borderValue);
++            break;
++        case MORPH_OPEN:
++            kcv_erode(src, tmp, _kernel, anchor, iterations, borderType, borderValue);
++            kcv_dilate(tmp, dst, _kernel, anchor, iterations, borderType, borderValue);
++            break;
++        case MORPH_CLOSE:
++            kcv_dilate(src, tmp, _kernel, anchor, iterations, borderType, borderValue);
++            kcv_erode(tmp, dst, _kernel, anchor, iterations, borderType, borderValue);
++            break;
++        default:
++            CV_Error(cv::Error::StsBadArg, "unknown morphological operation");
++    }
++    return 0;
++}
++
+ void morphologyEx( InputArray _src, OutputArray _dst, int op,
+                        InputArray _kernel, Point anchor, int iterations,
+                        int borderType, const Scalar& borderValue )
+ {
++    int retcode = kcv_morphologyEx(_src, _dst, op, _kernel, anchor, iterations);
++    if (retcode == 0 || retcode == 1)
++        return;
+     CV_INSTRUMENT_REGION();
+ 
+     CV_Assert(!_src.empty());
+diff -Naur org/opencv/modules/imgproc/src/resize.cpp opencv/modules/imgproc/src/resize.cpp
+--- org/opencv/modules/imgproc/src/resize.cpp	2026-06-24 12:31:00.331950475 +0800
++++ opencv/modules/imgproc/src/resize.cpp	2026-06-12 14:49:06.244120037 +0800
+@@ -4142,9 +4142,828 @@
+ 
+ //==================================================================================================
+ 
++namespace {
++enum InterpolationFlags {
++    INTER_NEAREST = 0,
++    INTER_LINEAR = 1,
++    INTER_CUBIC = 2,
++    INTER_AREA = 3,
++    INTER_LANCZOS4 = 4,
++    INTER_LINEAR_EXACT = 5,
++    INTER_NEAREST_EXACT = 6,
++    INTER_MAX = 7,
++    WARP_FILL_OUTLIERS = 8,
++    WARP_INVERSE_MAP = 16,
++    WARP_RELATIVE_MAP = 32
++};
++const int INTER_RESIZE_COEF_BITS1 = 11;
++const int INTER_RESIZE_COEF_SCALE1 = 1 << INTER_RESIZE_COEF_BITS1;
++static const int MAX_ESIZE1 = 16;
++}  // namespace
++namespace cv {
++
++bool g_isIllegal = false;
++
++static inline int _clip(int x, int a, int b)
++{
++    return x >= a ? (x < b ? x : b - 1) : a;
++}
++static inline void _interpolateCubic(float x, float *coeffs)
++{
++    const float A = -0.75f;
++    coeffs[0] = ((A * (x + 1) - 5 * A) * (x + 1) + 8 * A) * (x + 1) - 4 * A;
++    coeffs[1] = ((A + 2) * x - (A + 3)) * x * x + 1;
++    coeffs[2] = ((A + 2) * (1 - x) - (A + 3)) * (1 - x) * (1 - x) + 1;
++    coeffs[3] = 1.f - coeffs[0] - coeffs[1] - coeffs[2];
++}
++template <typename ST, typename DT, int bits>
++struct FixedPtCast1 {
++    using type1 = ST;
++    using rtype = DT;
++    enum { SHIFT = bits, DELTA = 1 << (bits - 1) };
++    DT operator()(ST val) const
++    {
++        return saturate_cast<DT>((val + DELTA) >> SHIFT);
++    }
++};
++using ResizeFunc = void (*)(const Mat &src, Mat &dst, const int *xofs, const void *alphax, const int *yofs,
++                            const void *betax, int xmin, int xmax, int ksize);
++struct _HResizeLinearVecU8_X4 {
++    int operator()(const uchar **src, int **dst, int count, const int *xofs, const short *alphax /* [xmax] */,
++                   int /* smax */, int /* dmax */, int cn, int /* xmin */, int xmax) const
++    {
++        int idx = 0;
++        int k = 0;
++        if (cn == 3) {
++            for (k = 0; k <= count - 2; k += 2) {
++                const uchar *S0 = src[k];
++                const uchar *S1 = src[k + 1];
++                int *D0 = dst[k];
++                int *D1 = dst[k + 1];
++                for (idx = 0; idx <= xmax - 8; idx += 8) {
++                    int16x4_t S0_val0_0 = {S0[xofs[idx]], S0[xofs[idx + 1]], S0[xofs[idx + 2]], S0[xofs[idx + 3]]};
++                    int16x4_t S0_val0_1 = {S0[xofs[idx + 4]], S0[xofs[idx + 5]], S0[xofs[idx + 6]], S0[xofs[idx + 7]]};
++                    int16x4_t S0_val1_0 = {S0[xofs[idx] + cn], S0[xofs[idx + 1] + cn], S0[xofs[idx + 2] + cn],
++                                           S0[xofs[idx + 3] + cn]};
++                    int16x4_t S0_val1_1 = {S0[xofs[idx + 4] + cn], S0[xofs[idx + 5] + cn], S0[xofs[idx + 6] + cn],
++                                           S0[xofs[idx + 7] + cn]};
++                    int16x4_t S1_val0_0 = {S1[xofs[idx]], S1[xofs[idx + 1]], S1[xofs[idx + 2]], S1[xofs[idx + 3]]};
++                    int16x4_t S1_val0_1 = {S1[xofs[idx + 4]], S1[xofs[idx + 5]], S1[xofs[idx + 6]], S1[xofs[idx + 7]]};
++                    int16x4_t S1_val1_0 = {S1[xofs[idx] + cn], S1[xofs[idx + 1] + cn], S1[xofs[idx + 2] + cn],
++                                           S1[xofs[idx + 3] + cn]};
++                    int16x4_t S1_val1_1 = {S1[xofs[idx + 4] + cn], S1[xofs[idx + 5] + cn], S1[xofs[idx + 6] + cn],
++                                           S1[xofs[idx + 7] + cn]};
++                    int16x4_t a0_0 = {alphax[idx * 2], alphax[(idx + 1) * 2], alphax[(idx + 2) * 2],
++                                      alphax[(idx + 3) * 2]};
++                    int16x4_t a0_1 = {alphax[(idx + 4) * 2], alphax[(idx + 5) * 2], alphax[(idx + 6) * 2],
++                                      alphax[(idx + 7) * 2]};
++                    int16x4_t a1_0 = {alphax[idx * 2 + 1], alphax[(idx + 1) * 2 + 1], alphax[(idx + 2) * 2 + 1],
++                                      alphax[(idx + 3) * 2 + 1]};
++                    int16x4_t a1_1 = {alphax[(idx + 4) * 2 + 1], alphax[(idx + 5) * 2 + 1], alphax[(idx + 6) * 2 + 1],
++                                      alphax[(idx + 7) * 2 + 1]};
++                    int32x4_t t0_0 = vmlal_s16(vmull_s16(S0_val0_0, a0_0), S0_val1_0, a1_0);
++                    int32x4_t t0_1 = vmlal_s16(vmull_s16(S0_val0_1, a0_1), S0_val1_1, a1_1);
++                    int32x4_t t1_0 = vmlal_s16(vmull_s16(S1_val0_0, a0_0), S1_val1_0, a1_0);
++                    int32x4_t t1_1 = vmlal_s16(vmull_s16(S1_val0_1, a0_1), S1_val1_1, a1_1);
++                    vst1q_s32(D0 + idx, t0_0);
++                    vst1q_s32(D0 + idx + 4, t0_1);
++                    vst1q_s32(D1 + idx, t1_0);
++                    vst1q_s32(D1 + idx + 4, t1_1);
++                }
++            }
++            CV_DbgAssert(idx < dmax);
++        } else {
++            return 0;
++        }
++        return idx;
++    }
++};
++using HResizeLinearVec_8u32s1 = _HResizeLinearVecU8_X4;
++struct _HResizeCubicU8 {
++    int operator()(const uchar **src, int **dst, int count, const int *xofs, const short *alphax /* [xmax] */,
++                   int /* smax */, int dmax, int cn, int /* xmin */, int xmax) const
++    {
++        int idx = 0;
++        for (int k = 0; k < count; k++) {
++            const uchar *S = src[k];
++            int *D = dst[k];
++            idx = 0;
++            for (; idx <= dmax - 4; idx += 4, alphax += 16) {
++                int sx0 = xofs[idx];
++                int sx1 = xofs[idx + 1];
++                int sx2 = xofs[idx + 2];
++                int sx3 = xofs[idx + 3];
++                int16x4_t v_S0 = {S[sx0 - cn], S[sx0], S[sx0 + cn], S[sx0 + cn * 2]};
++                int16x4_t v_S1 = {S[sx1 - cn], S[sx1], S[sx1 + cn], S[sx1 + cn * 2]};
++                int16x4_t v_S2 = {S[sx2 - cn], S[sx2], S[sx2 + cn], S[sx2 + cn * 2]};
++                int16x4_t v_S3 = {S[sx3 - cn], S[sx3], S[sx3 + cn], S[sx3 + cn * 2]};
++                int16x4_t v_a0 = vld1_s16(alphax);
++                int16x4_t v_a1 = vld1_s16(alphax + 4);
++                int16x4_t v_a2 = vld1_s16(alphax + 8);
++                int16x4_t v_a3 = vld1_s16(alphax + 12);
++                D[idx] = vaddvq_s32(vmull_s16(v_S0, v_a0));
++                D[idx + 1] = vaddvq_s32(vmull_s16(v_S1, v_a1));
++                D[idx + 2] = vaddvq_s32(vmull_s16(v_S2, v_a2));
++                D[idx + 3] = vaddvq_s32(vmull_s16(v_S3, v_a3));
++            }
++            for (; idx < dmax; idx++, alphax += 4) {
++                int isx = xofs[idx];
++                D[idx] = S[isx - cn] * alphax[0] + S[isx] * alphax[1] + S[isx + cn] * alphax[2] +
++                         S[isx + cn * 2] * alphax[3];
++            }
++            alphax -= dmax * 4;
++        }
++        (void)xmax;
++        return idx;
++    }
++};
++struct _VResizeCubicVec_32s8u {
++    int operator()(const int **src, uchar *dst, const short *betax, int width) const
++    {
++        (void)src;
++        (void)dst;
++        (void)betax;
++        (void)width;
++        return 0;
++    }
++};
++struct _VResizeLinearVec_32s8u {
++    int operator()(const int **src, uchar *dst, const short *betax, int width) const
++    {
++        const int *S0 = src[0];
++        const int *S1 = src[1];
++        int16_t b0 = betax[0];
++        int16_t b1 = betax[1];
++        int x = 0;
++        int32x4_t v_b0 = vdupq_n_s32(b0);
++        int32x4_t v_b1 = vdupq_n_s32(b1);
++        for (; x <= width - 16; x += 16) {
++            __builtin_prefetch(S0 + x + 16, 0, 3);
++            __builtin_prefetch(S1 + x + 16, 0, 3);
++            __builtin_prefetch(dst + x + 16, 1, 3);
++            int16x4_t temp[4];
++            temp[0] =
++                vqmovn_s32(vshrq_n_s32(vmlaq_s32(vmulq_s32(v_b1, vld1q_s32(S1 + x)), v_b0, vld1q_s32(S0 + x)), 22));
++            temp[1] = vqmovn_s32(
++                vshrq_n_s32(vmlaq_s32(vmulq_s32(v_b1, vld1q_s32(S1 + x + 4)), v_b0, vld1q_s32(S0 + x + 4)), 22));
++            temp[2] = vqmovn_s32(
++                vshrq_n_s32(vmlaq_s32(vmulq_s32(v_b1, vld1q_s32(S1 + x + 8)), v_b0, vld1q_s32(S0 + x + 8)), 22));
++            temp[3] = vqmovn_s32(
++                vshrq_n_s32(vmlaq_s32(vmulq_s32(v_b1, vld1q_s32(S1 + x + 12)), v_b0, vld1q_s32(S0 + x + 12)), 22));
++            uint8x8_t ret1 = vqmovun_s16(vcombine_s16(temp[0], temp[1]));
++            uint8x8_t ret2 = vqmovun_s16(vcombine_s16(temp[2], temp[3]));
++            vst1_u8(dst + x, ret1);
++            vst1_u8(dst + x + 8, ret2);
++        }
++        return x;
++    }
++};
++template <typename T, typename WT, typename AT, int ONE, class VecOp>
++struct _HResizeLinear {
++    using value_type = T;
++    using buf_type = WT;
++    using alpha_type = AT;
++
++    void operator()(const T **src, WT **dst, int count, const int *xofs, const AT *alphax, int swidth, int dwidth,
++                    int cn, int xmin, int xmax) const
++    {
++        int idx;
++        int k;
++        VecOp vecOp;
++
++        int dx0 = vecOp(src, dst, count, xofs, alphax, swidth, dwidth, cn, xmin, xmax);
++        for (k = 0; k <= count - 2; k += 2) {
++            const T *S0 = src[k];
++            const T *S1 = src[k + 1];
++            WT *D0 = dst[k];
++            WT *D1 = dst[k + 1];
++            for (idx = dx0; idx < xmax; idx++) {
++                int isx = xofs[idx];
++                WT a0 = alphax[idx * 2];
++                WT a1 = alphax[idx * 2 + 1];
++                WT t0 = S0[isx] * a0 + S0[isx + cn] * a1;
++                WT t1 = S1[isx] * a0 + S1[isx + cn] * a1;
++                D0[idx] = t0;
++                D1[idx] = t1;
++            }
++            for (; idx < dwidth; idx++) {
++                int isx = xofs[idx];
++                D0[idx] = WT(S0[isx] * ONE);
++                D1[idx] = WT(S1[isx] * ONE);
++            }
++        }
++        for (; k < count; k++) {
++            const T *S = src[k];
++            WT *D = dst[k];
++            for (idx = dx0; idx < xmax; idx++) {
++                int isx = xofs[idx];
++                D[idx] = S[isx] * alphax[idx * 2] + S[isx + cn] * alphax[idx * 2 + 1];
++            }
++            for (; idx < dwidth; idx++) {
++                D[idx] = WT(S[xofs[idx]] * ONE);
++            }
++        }
++    }
++};
++template <typename T, typename WT, typename AT, class CastOp, class VecOp>
++struct _VResizeLinear {
++};
++template <>
++struct _VResizeLinear<uchar, int, short, FixedPtCast1<int, uchar, INTER_RESIZE_COEF_BITS1 * 2>,
++                      _VResizeLinearVec_32s8u> {
++    typedef uchar value_type;
++    typedef int buf_type;
++    typedef short alpha_type;
++
++    void operator()(const buf_type **src, value_type *dst, const alpha_type *betax, int width) const
++    {
++        alpha_type b0 = betax[0];
++        alpha_type b1 = betax[1];
++        const buf_type *S0 = src[0];
++        const buf_type *S1 = src[1];
++        _VResizeLinearVec_32s8u vecOp;
++
++        int x = vecOp(src, dst, betax, width);
++        for (; x < width; x++) {
++            dst[x] = uchar((((b0 * (S0[x] >> 4)) >> 16) + ((b1 * (S1[x] >> 4)) >> 16) + 2) >> 2);
++        }
++    }
++};
++
++template <typename T, typename WT, typename AT, class VecOp>
++struct _HResizeCubic {
++    using value_type = T;
++    using buf_type = WT;
++    using alpha_type = AT;
++
++    void operator()(const T **src, WT **dst, int count, const int *xofs, const AT *alphax, int swidth, int dwidth,
++                    int cn, int xmin, int xmax) const
++    {
++        VecOp vecOp;
++        int dx0 = vecOp(src, dst, count, xofs, alphax, swidth, dwidth, cn, xmin, xmax);
++        for (int k = 0; k < count; k++) {
++            const T *S = src[k];
++            WT *D = dst[k];
++            int idx = dx0;
++            int limit = xmin;
++            for (;;) {
++                for (; idx < limit; idx++, alphax += 4) {
++                    int j;
++                    int isx = xofs[idx] - cn;
++                    WT value = 0;
++                    for (j = 0; j < 4; j++) {
++                        int tmp = isx + j * cn;
++                        if (static_cast<unsigned>(tmp) >= static_cast<unsigned>(swidth)) {
++                            while (tmp < 0) {
++                                tmp += cn;
++                            }
++                            while (tmp >= swidth) {
++                                tmp -= cn;
++                            }
++                        }
++                        value += S[tmp] * alphax[j];
++                    }
++                    D[idx] = value;
++                }
++                if (limit == dwidth) {
++                    break;
++                }
++                for (; idx < xmax; idx++, alphax += 4) {
++                    int isx = xofs[idx];
++                    // 2 3数组下标
++                    D[idx] = S[isx - cn] * alphax[0] + S[isx] * alphax[1] + S[isx + cn] * alphax[2] +
++                             S[isx + cn * 2] * alphax[3];
++                }
++                limit = dwidth;
++            }
++            alphax -= dwidth * 4;
++        }
++    }
++};
++
++template <typename T, typename WT, typename AT, class CastOp, class VecOp>
++struct _VResizeCubic {
++    using value_type = T;
++    using buf_type = WT;
++    using alpha_type = AT;
++
++    void operator()(const WT **src, T *dst, const AT *betax, int width) const
++    {
++        WT b0 = betax[0];
++        WT b1 = betax[1];
++        WT b2 = betax[2];
++        WT b3 = betax[3];
++        const WT *S0 = src[0];
++        const WT *S1 = src[1];
++        const WT *S2 = src[2];
++        const WT *S3 = src[3];
++        CastOp castOp;
++        VecOp vecOp;
++
++        int x = vecOp(src, dst, betax, width);
++        for (; x < width; x++) {
++            dst[x] = castOp(S0[x] * b0 + S1[x] * b1 + S2[x] * b2 + S3[x] * b3);
++        }
++    }
++};
++
++template <typename HResize, typename VResize>
++class _resizeGeneric_Invoker {
++public:
++    using T = typename HResize::value_type;
++    using WT = typename HResize::buf_type;
++    using AT = typename HResize::alpha_type;
++
++    _resizeGeneric_Invoker(const Mat &_src, Mat &_dst, const int *_xofs, const int *_yofs, const AT *_alpha,
++                           const AT *__beta, const Size &_ssize, const Size &_dsize, int _ksize, int _xmin, int _xmax)
++        : src(_src),
++          dst(_dst),
++          xofs(_xofs),
++          yofs(_yofs),
++          alphax(_alpha),
++          _beta(__beta),
++          ssize(_ssize),
++          dsize(_dsize),
++          ksize(_ksize),
++          xmin(_xmin),
++          xmax(_xmax)
++    {
++    }
++    void operator()(const Range &range) const
++    {
++        int cn = src.channels();
++        int bufstep = (int)alignSize(dsize.width, 16);
++
++#pragma omp parallel num_threads(20)
++        {
++            HResize hresize;
++            VResize vresize;
++
++            AutoBuffer<WT> _buffer(bufstep * ksize);
++            const T *srows[MAX_ESIZE1] = {0};
++            WT *rows[MAX_ESIZE1] = {0};
++            int prev_sy[MAX_ESIZE1];
++
++            for (int k = 0; k < ksize; k++) {
++                prev_sy[k] = -1;
++                rows[k] = _buffer.data() + bufstep * k;
++            }
++
++#pragma omp for schedule(auto)
++            for (int idy = range.start; idy < range.end; idy++) {
++                const AT *betax = _beta + ksize * idy;
++                int sy0 = yofs[idy];
++                int k0 = ksize;
++                int k1 = 0;
++                int ksize3 = ksize / 2;
++
++                for (int k = 0; k < ksize; k++) {
++                    int isy = _clip(sy0 - ksize3 + 1 + k, 0, ssize.height);
++                    for (k1 = std::max(k1, k); k1 < ksize; k1++) {
++                        if (k1 < MAX_ESIZE1 && isy == prev_sy[k1]) {
++                            if (k1 > k)
++                                memcpy(rows[k], rows[k1], bufstep * sizeof(rows[0][0]));
++                            break;
++                        }
++                    }
++                    if (k1 == ksize) {
++                        k0 = std::min(k0, k);
++                    }
++                    srows[k] = src.template ptr<T>(isy);
++                    prev_sy[k] = isy;
++                }
++
++                if (k0 < ksize)
++                    hresize((const T **)(srows + k0), (WT **)(rows + k0), ksize - k0, xofs, (const AT *)(alphax),
++                            ssize.width, dsize.width, cn, xmin, xmax);
++                vresize((const WT **)rows, (T *)(dst.data + dst.step * idy), betax, dsize.width);
++            }
++        }
++    }
++
++private:
++    Mat src;
++    Mat dst;
++    const int *xofs, *yofs;
++    const AT *alphax, *_beta;
++    Size ssize, dsize;
++    const int ksize, xmin, xmax;
++
++    _resizeGeneric_Invoker &operator=(const _resizeGeneric_Invoker &);
++    _resizeGeneric_Invoker(const _resizeGeneric_Invoker& other);
++};
++
++template <class HResize, class VResize>
++static void _resizeGeneric_(const Mat &src, Mat &dst, const int *xofs, const void *_alpha, const int *yofs,
++                            const void *_beta, int xmin, int xmax, int ksize)
++{
++    using AT = typename HResize::alpha_type;
++    const AT *betax = static_cast<const AT *>(_beta);
++    Size ssize = src.size();
++    Size dsize = dst.size();
++    int cn = src.channels();
++    ssize.width *= cn;
++    dsize.width *= cn;
++    xmin *= cn;
++    xmax *= cn;
++
++    Range range(0, dsize.height);
++    _resizeGeneric_Invoker<HResize, VResize> invoker(src, dst, xofs, yofs, (const AT *)_alpha, betax, ssize, dsize,
++                                                     ksize, xmin, xmax);
++    invoker(range);
++}
++class _resizeNN_bitexactInvoker : public ParallelLoopBody {
++public:
++    _resizeNN_bitexactInvoker(const Mat &_src, Mat &_dst, int *_xOffset, int _ify, int _ify0)
++        : src(_src),
++          dst(_dst),
++          xOffset(_xOffset),
++          ify(_ify),
++          ify0(_ify0)
++    {
++    }
++
++    virtual void operator()(const Range &range) const CV_OVERRIDE
++    {
++        Size ssize = src.size();
++        Size dsize = dst.size();
++        int pix_size = (int)src.elemSize();
++#pragma omp parallel for num_threads(12)
++        for (int y = range.start; y < range.end; y++) {
++            int x = 0;
++            int _sy = (ify * y + ify0) >> 16;
++            uchar *D = dst.ptr(y);
++            int isy = std::min(_sy, ssize.height - 1);
++            const uchar *S = src.ptr(isy);
++            switch (pix_size) {
++                case 3:
++#if (CV_SIMD || CV_SIMD_SCALABLE)
++                    for (; x <= dsize.width - 8; x += 8, D += 24) {
++                        uint8x8_t _tS0 = vld1_u8(S + xOffset[x + 0] * 3);
++                        uint8x8_t _tS1 = vld1_u8(S + xOffset[x + 1] * 3);
++                        uint8x8_t _tS2 = vld1_u8(S + xOffset[x + 2] * 3);
++                        uint8x8_t _tS3 = vld1_u8(S + xOffset[x + 3] * 3);
++                        uint8x8_t _tS4 = vld1_u8(S + xOffset[x + 4] * 3);
++                        uint8x8_t _tS5 = vld1_u8(S + xOffset[x + 5] * 3);
++                        uint8x8_t _tS6 = vld1_u8(S + xOffset[x + 6] * 3);
++                        uint8x8_t _tS7 = vld1_u8(S + xOffset[x + 7] * 3);
++
++                        vst1_u8(D, _tS0);
++                        vst1_u8(D + 3, _tS1);
++                        vst1_u8(D + 6, _tS2);
++                        vst1_u8(D + 9, _tS3);
++                        vst1_u8(D + 12, _tS4);
++                        vst1_u8(D + 15, _tS5);
++                        D[18] = vget_lane_u8(_tS6, 0);
++                        D[19] = vget_lane_u8(_tS6, 1);
++                        D[20] = vget_lane_u8(_tS6, 2);
++                        D[21] = vget_lane_u8(_tS7, 0);
++                        D[22] = vget_lane_u8(_tS7, 1);
++                        D[23] = vget_lane_u8(_tS7, 2);
++                    }
++#endif
++                    for (; x < dsize.width; x++, D += 3) {
++                        const uchar *_tS = S + xOffset[x] * 3;
++                        D[0] = _tS[0];
++                        D[1] = _tS[1];
++                        D[2] = _tS[2];
++                    }
++                    break;
++                default:
++                    for (x = 0; x < dsize.width; x++, D += pix_size) {
++                        const uchar *_tS1 = S + xOffset[x] * pix_size;
++                        for (int j = 0; j < pix_size; j++)
++                            D[j] = _tS1[j];
++                    }
++            }
++        }
++    }
++
++private:
++    const Mat &src;
++    Mat &dst;
++    int *xOffset; // Offset
++    const int ify;
++    const int ify0;
++};
++static void _resizeNN_bitexact(const Mat &src, Mat &dst, double /* ifx */, double /* ify */)
++{
++    Size ssize = src.size();
++    Size dsize = dst.size();
++    int ifx = ((ssize.width << 16) + dsize.width / 2) / dsize.width;  // 16bit fixed-point arithmetic
++    int ifx0 = ifx / 2 - ssize.width % 2;  // This method uses center pixel coordinate as Pillow and scikit-images do.
++    int ify = ((ssize.height << 16) + dsize.height / 2) / dsize.height;
++    int ify0 = ify / 2 - ssize.height % 2;
++
++    std::vector<int> xOffset(dsize.width * 16, 0);
++
++    for (int x = 0; x < dsize.width; x++) {
++        int isx = (ifx * x + ifx0) >> 16;
++        xOffset[x] = std::min(isx, ssize.width - 1);  // offset in element (not byte)
++    }
++    Range range(0, dsize.height);
++    _resizeNN_bitexactInvoker invoker(src, dst, xOffset.data(), ify, ify0);
++    invoker(range);
++}
++
++class _resizeNNInvoker :
++    public ParallelLoopBody {
++public:
++    _resizeNNInvoker(const Mat &_src, Mat &_dst, int *xOffsett, double ifyy)
++        : src(_src),
++          dst(_dst),
++          xOffset(xOffsett),
++          ify(ifyy)
++    {
++    }
++
++    void operator()(const Range &range) const CV_OVERRIDE
++    {
++        Size ssize = src.size();
++        Size dsize = dst.size();
++        int pix_size = (int)src.elemSize();
++#pragma omp parallel for num_threads(12)
++        for (int y = range.start; y < range.end; y++) {
++            int x = 0;
++            int _sy = cvFloor(ify * y);
++            uchar *D = dst.ptr(y);
++            int isy = std::min(_sy, ssize.height - 1);
++            const uchar *S = src.ptr(isy);
++            switch (pix_size) {
++                case 3:
++#if (CV_SIMD || CV_SIMD_SCALABLE)
++                    for (; x <= dsize.width - 8; x += 8, D += 24) {
++                        uint8x8_t _tS0 = vld1_u8(S + xOffset[x + 0] * 3);
++                        uint8x8_t _tS1 = vld1_u8(S + xOffset[x + 1] * 3);
++                        uint8x8_t _tS2 = vld1_u8(S + xOffset[x + 2] * 3);
++                        uint8x8_t _tS3 = vld1_u8(S + xOffset[x + 3] * 3);
++                        uint8x8_t _tS4 = vld1_u8(S + xOffset[x + 4] * 3);
++                        uint8x8_t _tS5 = vld1_u8(S + xOffset[x + 5] * 3);
++                        uint8x8_t _tS6 = vld1_u8(S + xOffset[x + 6] * 3);
++                        uint8x8_t _tS7 = vld1_u8(S + xOffset[x + 7] * 3);
++
++                        vst1_u8(D, _tS0);
++                        vst1_u8(D + 3, _tS1);
++                        vst1_u8(D + 6, _tS2);
++                        vst1_u8(D + 9, _tS3);
++                        vst1_u8(D + 12, _tS4);
++                        vst1_u8(D + 15, _tS5);
++                        D[18] = vget_lane_u8(_tS6, 0);
++                        D[19] = vget_lane_u8(_tS6, 1);
++                        D[20] = vget_lane_u8(_tS6, 2);
++                        D[21] = vget_lane_u8(_tS7, 0);
++                        D[22] = vget_lane_u8(_tS7, 1);
++                        D[23] = vget_lane_u8(_tS7, 2);
++                    }
++#endif
++                    for (; x < dsize.width; x++, D += 3) {
++                        const uchar *_tS = S + xOffset[x] * 3;
++                        D[0] = _tS[0];
++                        D[1] = _tS[1];
++                        D[2] = _tS[2];
++                    }
++                    break;
++                default:
++                    for (x = 0; x < dsize.width; x++, D += pix_size) {
++                        const uchar *_tS1 = S + xOffset[x] * pix_size;
++                        for (int j = 0; j < pix_size; j++)
++                            D[j] = _tS1[j];
++                    }
++            }
++        }
++    }
++
++private:
++    const Mat &src;
++    Mat &dst;
++    int *xOffset;
++    const double ify;
++};
++
++static void _resizeNN(const Mat &src, Mat &dst, double fx, double fy)
++{
++    Size ssize = src.size();
++    Size dsize = dst.size();
++
++    AutoBuffer<int> _x_ofs(dsize.width);
++    int* xOfs = _x_ofs.data();
++    double ifx1 = 1. / fx;
++    double ify1 = 1. / fy;
++    for (int x = 0; x < dsize.width; ++x) {
++        int sx = cvFloor(x * ifx1);
++        xOfs[x] = std::min(sx, ssize.width-1);
++    }
++
++    Range range(0, dsize.height);
++    _resizeNNInvoker invoker(src, dst, xOfs, ify1);
++    invoker(range);
++}
++
++static void resize_(int src_type, const uchar *src_data, size_t src_step, int src_width, int src_height, uchar *dst_data,
++             size_t dst_step, int dst_width, int dst_height, double inv_scale_x, double inv_scale_y, int interpolation)
++{
++    if (inv_scale_x < DBL_EPSILON || inv_scale_y < DBL_EPSILON) {
++        inv_scale_x = static_cast<double>(dst_width) / src_width;
++        inv_scale_y = static_cast<double>(dst_height) / src_height;
++    }
++
++    int depth = CV_MAT_DEPTH(src_type);
++    int cn = CV_MAT_CN(src_type);
++    Size dsize = Size(saturate_cast<int>(src_width * inv_scale_x), saturate_cast<int>(src_height * inv_scale_y));
++
++    static ResizeFunc linear_tab[] = {
++        _resizeGeneric_<_HResizeLinear<uchar, int, short, INTER_RESIZE_COEF_SCALE1, HResizeLinearVec_8u32s1>,
++                        _VResizeLinear<uchar, int, short, FixedPtCast1<int, uchar, INTER_RESIZE_COEF_BITS1 * 2>,
++                                       _VResizeLinearVec_32s8u>>};
++
++    static ResizeFunc cubic_tab[] = {
++        _resizeGeneric_<_HResizeCubic<uchar, int, short, _HResizeCubicU8>,
++                        _VResizeCubic<uchar, int, short, FixedPtCast1<int, uchar, INTER_RESIZE_COEF_BITS1 * 2>,
++                                      _VResizeCubicVec_32s8u>>};
++
++    double scale_x = 1. / inv_scale_x;
++    double scale_y = 1. / inv_scale_y;
++
++    Mat src(Size(src_width, src_height), src_type, const_cast<uchar *>(src_data), src_step);
++    Mat dst(dsize, src_type, dst_data, dst_step);
++
++    if (interpolation == INTER_NEAREST_EXACT) {
++        _resizeNN_bitexact(src, dst, inv_scale_x, inv_scale_y);
++        return;
++    }
++    if (interpolation == INTER_NEAREST) {
++        _resizeNN(src, dst, inv_scale_x, inv_scale_y);
++        return;
++    }
++    int k;
++    int isx;
++    int isy;
++    int idx;
++    int idy;
++
++    int xmin = 0;
++    int xmax = dsize.width;
++    int width = dsize.width * cn;
++    bool area_mode = interpolation == INTER_AREA;
++    bool fixpt = depth == CV_8U;
++    float ifx;
++    float ify;
++    ResizeFunc func = nullptr;
++    int ksize = 0;
++    int ksize3;
++    if (interpolation == INTER_CUBIC) {
++        ksize = 4, func = cubic_tab[depth];
++    } else if (interpolation == INTER_LINEAR) {
++        ksize = 2, func = linear_tab[depth];
++    } else {
++        printf("Unknown interpolation method");
++    }
++    ksize3 = ksize / 2;
++    AutoBuffer<uchar> _buffer((width + dsize.height) * (sizeof(int) + sizeof(float) * ksize));
++    int *xofs = (int *)_buffer.data();
++    int *yofs = xofs + width;
++    float *alphax = reinterpret_cast<float *>(yofs + dsize.height);
++    short *ialphax = reinterpret_cast<short *>(alphax);
++    short *ibetax = ialphax + width * ksize;
++    float *betax = alphax + width * ksize;
++    float cbuf[MAX_ESIZE1] = {0};
++
++    for (idx = 0; idx < dsize.width; idx++) {
++        if (!area_mode) {
++            ifx = (float)((idx + 0.5) * scale_x - 0.5);  // 0.5是为了对齐调整坐标
++            isx = cvFloor(ifx);
++            ifx -= isx;
++        } else {
++            isx = cvFloor(idx * scale_x);
++            ifx = (float)((idx + 1) - (isx + 1) * inv_scale_x);
++            ifx = ifx <= 0 ? 0.f : ifx - cvFloor(ifx);
++        }
++
++        if (isx < ksize3 - 1) {
++            xmin = idx + 1;
++            if (isx < 0 && (interpolation != INTER_CUBIC && interpolation != INTER_LANCZOS4))
++                ifx = 0, isx = 0;
++        }
++
++        if (isx + ksize3 >= src_width) {
++            if (isx >= src_width - 1 && (interpolation != INTER_CUBIC && interpolation != INTER_LANCZOS4))
++                ifx = 0, isx = src_width - 1;
++            xmax = std::min(xmax, idx);
++        }
++
++        for (k = 0, isx *= cn; k < cn; k++)
++            xofs[idx * cn + k] = isx + k;
++
++        if (interpolation == INTER_CUBIC)
++            _interpolateCubic(ifx, cbuf);
++        else {
++            cbuf[0] = 1.f - ifx;
++            cbuf[1] = ifx;
++        }
++        if (fixpt) {
++            for (k = 0; k < ksize; k++)
++                ialphax[idx * cn * ksize + k] = saturate_cast<short>(cbuf[k] * INTER_RESIZE_COEF_SCALE1);
++            for (; k < cn * ksize; k++)
++                ialphax[idx * cn * ksize + k] = ialphax[idx * cn * ksize + k - ksize];
++        } else {
++            for (k = 0; k < ksize; k++)
++                alphax[idx * cn * ksize + k] = cbuf[k];
++            for (; k < cn * ksize; k++)
++                alphax[idx * cn * ksize + k] = alphax[idx * cn * ksize + k - ksize];
++        }
++    }
++
++    for (idy = 0; idy < dsize.height; idy++) {
++        if (!area_mode) {
++            ify = (float)((idy + 0.5) * scale_y - 0.5);  // 0.5是为了对齐调整坐标
++            isy = cvFloor(ify);
++            ify -= isy;
++        } else {
++            isy = cvFloor(idy * scale_y);
++            ify = (float)((idy + 1) - (isy + 1) * inv_scale_y);
++            ify = ify <= 0 ? 0.f : ify - cvFloor(ify);
++        }
++
++        yofs[idy] = isy;
++        if (interpolation == INTER_CUBIC)
++            _interpolateCubic(ify, cbuf);
++        else {
++            cbuf[0] = 1.f - ify;
++            cbuf[1] = ify;
++        }
++
++        if (fixpt) {
++            for (k = 0; k < ksize; k++)
++                ibetax[idy * ksize + k] = saturate_cast<short>(cbuf[k] * INTER_RESIZE_COEF_SCALE1);
++        } else {
++            for (k = 0; k < ksize; k++)
++                betax[idy * ksize + k] = cbuf[k];
++        }
++    }
++
++    func(src, dst, xofs, fixpt ? (void *)ialphax : (void *)alphax, yofs, fixpt ? (void *)ibetax : (void *)betax, xmin,
++         xmax, ksize);
++}
++
++static int kcv_resize(InputArray _src, OutputArray _dst, Size dsize, double inv_scale_x, double inv_scale_y, int interpolation)
++{
++    Size ssize = _src.size();
++    if (_src.empty() || ssize.empty()) {
++        return 1;
++    }
++    if (!((_src.type() == CV_8UC3) || (_src.type() == CV_8UC1))) {
++        return 2;
++    }
++    if (!((interpolation == 0 || interpolation == 1 || interpolation == 2 || interpolation == 6))) {
++        return 2;
++    }
++    if (dsize.empty()) {
++        if (!(inv_scale_x > 0)) {
++            return 1;
++        }
++        if (!(inv_scale_y > 0)) {
++            return 1;
++        }
++        dsize = Size(saturate_cast<int>(ssize.width * inv_scale_x), saturate_cast<int>(ssize.height * inv_scale_y));
++        if (dsize.empty()) {
++            return 1;
++        }
++    } else {
++        inv_scale_x = (double)dsize.width / ssize.width;
++        inv_scale_y = (double)dsize.height / ssize.height;
++        if (!(inv_scale_x > 0)) {
++            return 1;
++        }
++        if (!(inv_scale_y > 0)) {
++            return 1;
++        }
++    }
++
++    if (interpolation == INTER_LINEAR_EXACT && (_src.depth() == CV_32F || _src.depth() == CV_64F)) {
++        interpolation = INTER_LINEAR;
++    }
++    Mat src = _src.getMat();
++    _dst.create(dsize, src.type());
++    Mat dst = _dst.getMat();
++    // dsize == ssize直接返回
++    if (dsize == ssize) {
++        src.copyTo(dst);
++        return 0;
++    }
++
++    resize_(src.type(), src.data, src.step, src.cols, src.rows, dst.data, dst.step, dst.cols, dst.rows, inv_scale_x,
++            inv_scale_y, interpolation);
++    return 0;
++}
++}
++
+ void cv::resize( InputArray _src, OutputArray _dst, Size dsize,
+                  double inv_scale_x, double inv_scale_y, int interpolation )
+ {
++
++    int retcode = cv::kcv_resize(_src,_dst,dsize,inv_scale_x,inv_scale_y,interpolation);
++    if(retcode == 0 || retcode == 1)
++        return;
+     CV_INSTRUMENT_REGION();
+ 
+     Size ssize = _src.size();
+diff -Naur org/opencv/modules/imgproc/src/shapedescr.cpp opencv/modules/imgproc/src/shapedescr.cpp
+--- org/opencv/modules/imgproc/src/shapedescr.cpp	2026-06-24 12:31:00.331950475 +0800
++++ opencv/modules/imgproc/src/shapedescr.cpp	2026-06-12 14:49:06.244120037 +0800
+@@ -304,9 +304,43 @@
+     return perimeter;
+ }
+ 
++namespace cv {
++
++static int kcv_contourArea(InputArray _contour, double & area, bool oriented = false)
++{
++    if (_contour.empty()) {
++        return 2;
++    }
++    Mat contour = _contour.getMat();
++    int npoints = contour.checkVector(2);
++    if (npoints < 1) {
++        return 2;
++    }
++    double a00 = 0;
++    const Point *ptsi = contour.ptr<Point>();
++
++    const Point *prev = &ptsi[npoints - 1];
++    for (int i = 0; i < npoints; i++) {
++        const Point &p = ptsi[i];
++        a00 += prev->x * p.y - prev->y * p.x;
++        prev = &p;
++    }
++
++    a00 *= 0.5; // 0.5
++    if (!oriented)
++        a00 = std::fabs(a00);
++    area = a00;
++    return 0;
++}
++}  // namespace cv
++
+ // area of a whole sequence
+ double cv::contourArea( InputArray _contour, bool oriented )
+ {
++    double area;
++    int retcode = cv::kcv_contourArea(_contour, area);
++    if(retcode == 0 || retcode == 1)
++        return area;
+     CV_INSTRUMENT_REGION();
+ 
+     Mat contour = _contour.getMat();
+diff -Naur org/opencv/modules/imgproc/src/smooth.dispatch.cpp opencv/modules/imgproc/src/smooth.dispatch.cpp
+--- org/opencv/modules/imgproc/src/smooth.dispatch.cpp	2026-06-24 12:31:00.331950475 +0800
++++ opencv/modules/imgproc/src/smooth.dispatch.cpp	2026-06-12 14:49:06.244120037 +0800
+@@ -608,10 +608,801 @@
+     return isValid;
+ }
+ 
++namespace kpInternal {
++const uint16_t THREADS = 48;
++template <typename _OutTp>
++inline _OutTp saturate_cast_(float x)
++{
++    return _OutTp(lrintf(x));
++}
++
++template <typename _OutTp>
++inline _OutTp saturate_cast_(uint32_t x)
++{
++    return _OutTp(x <= 255u ? x : 255);
++}
++
++template <typename _OutTp>
++inline _OutTp saturate_cast_(int x)
++{
++    return _OutTp(x <= 255 ? x : 255);
++}
++
++constexpr float chunk = static_cast<float>(1 << 12);
++template <typename _InTp>
++inline uint8_t saturatingRoundingShiftRight(_InTp value, int n)
++{
++    return saturate_cast_<uint8_t>((value + (1 << (n - 1))) >> n);
++}
++}  // namespace kpInternal
++
++static inline uint8x8_t gaussianBlurU8C3BD1x3Kernal(
++    uint16x8_t &line0, uint16x8_t &line1, uint16x8_t &line2, uint16x4_t &k0, uint16x4_t &k1, uint16x4_t &k2)
++{
++    uint32x4_t v_dst0 = vmull_u16(vget_low_u16(line0), k0);
++    uint32x4_t v_dst1 = vmull_u16(vget_high_u16(line0), k0);
++
++    v_dst0 = vmlal_u16(v_dst0, vget_low_u16(line1), k1);
++    v_dst1 = vmlal_u16(v_dst1, vget_high_u16(line1), k1);
++
++    v_dst0 = vmlal_u16(v_dst0, vget_low_u16(line2), k2);
++    v_dst1 = vmlal_u16(v_dst1, vget_high_u16(line2), k2);
++
++    uint8x8_t v_dst = vqmovn_u16(vcombine_u16(vrshrn_n_u32(v_dst0, 16), vrshrn_n_u32(v_dst1, 16)));
++
++    return v_dst;
++}
++
++static void gaussianBlurU8C1BDNx1(const uchar *src_data, size_t srcStep, uchar *dst_data, size_t dstStep, int width,
++    int height, const uint16_t *kx, int ksizeX)
++
++{
++    int nstripes =
++        std::min(std::max(static_cast<int>(static_cast<float>(height) * width / kpInternal::chunk), 1), height);
++
++#pragma omp parallel for proc_bind(close) num_threads(kpInternal::THREADS)
++    for (int i = 0; i < nstripes; ++i) {
++        int lineStart = static_cast<int>(static_cast<float>(height) / nstripes * i + 0.5);
++        int lineEnd = static_cast<int>(static_cast<float>(height) / nstripes * (i + 1) + 0.5);
++
++        for (int lineNum = lineStart; lineNum < lineEnd; ++lineNum) {
++            int edge = (ksizeX - 1) / 2;
++            int &mid = edge;
++            const uint8_t *src = src_data + srcStep * lineNum;
++            uint8_t *dst = dst_data + dstStep * lineNum;
++            int w = 0;
++            // left edge
++            for (; w < edge; ++w) {
++                uint16_t temp = src[w * 1 + 0] * kx[mid];  // mid pixel
++                for (int shift = 1; shift <= edge; ++shift) {
++                    temp += (src[abs(w - shift) * 1 + 0] + src[(w + shift) * 1 + 0]) * kx[mid - shift];
++                }
++                dst[w * 1 + 0] = kpInternal::saturatingRoundingShiftRight<uint16_t>(temp, 8);
++            }
++
++            // body part
++            w -= edge;
++            uint8x8_t vsrc1;  // current 8 pixels
++            uint8x8_t vsrc2;  // next 8 pixels
++            uint8x8_t result;
++            uint16x8_t temp;
++            uint16x8_t coef[8];
++
++            for (; w < width - (ksizeX + 8); w += 8) {
++                temp = vdupq_n_u16(0);
++                int batch = 0;
++                vsrc1 = vld1_u8(src + (w + 8 * 0) * 1);
++                for (; batch < ksizeX / 8; ++batch) {
++                    vsrc2 = vld1_u8(src + (w + 8 * (batch + 1)) * 1);
++
++                    coef[0] = vdupq_n_u16(kx[batch * 8 + 0]);
++                    coef[1] = vdupq_n_u16(kx[batch * 8 + 1]);
++                    coef[2] = vdupq_n_u16(kx[batch * 8 + 2]);
++                    coef[3] = vdupq_n_u16(kx[batch * 8 + 3]);
++                    coef[4] = vdupq_n_u16(kx[batch * 8 + 4]);
++                    coef[5] = vdupq_n_u16(kx[batch * 8 + 5]);
++                    coef[6] = vdupq_n_u16(kx[batch * 8 + 6]);
++                    coef[7] = vdupq_n_u16(kx[batch * 8 + 7]);
++
++                    temp = vmlaq_u16(temp, vmovl_u8(vsrc1), coef[0]);
++                    temp = vmlaq_u16(temp, vmovl_u8(vext_u8(vsrc1, vsrc2, 1)), coef[1]);
++                    temp = vmlaq_u16(temp, vmovl_u8(vext_u8(vsrc1, vsrc2, 2)), coef[2]);
++                    temp = vmlaq_u16(temp, vmovl_u8(vext_u8(vsrc1, vsrc2, 3)), coef[3]);
++                    temp = vmlaq_u16(temp, vmovl_u8(vext_u8(vsrc1, vsrc2, 4)), coef[4]);
++                    temp = vmlaq_u16(temp, vmovl_u8(vext_u8(vsrc1, vsrc2, 5)), coef[5]);
++                    temp = vmlaq_u16(temp, vmovl_u8(vext_u8(vsrc1, vsrc2, 6)), coef[6]);
++                    temp = vmlaq_u16(temp, vmovl_u8(vext_u8(vsrc1, vsrc2, 7)), coef[7]);
++                    vsrc1 = vsrc2;
++                }
++
++                for (int ki = batch * 8; ki < ksizeX; ++ki) {
++                    coef[0] = vdupq_n_u16(kx[ki]);
++                    vsrc1 = vld1_u8(src + (w + ki) * 1);
++
++                    temp = vmlaq_u16(temp, vmovl_u8(vsrc1), coef[0]);
++                }
++
++                result = vqrshrn_n_u16(temp, 8);
++                vst1_u8(dst + (w + edge) * 1, result);
++            }
++
++            // right edge
++            w += edge;
++            for (; w < width; ++w) {
++                uint16_t temp_pixel = src[w * 1 + 0] * kx[mid];  // mid pixel
++                for (int shift = 1; shift <= edge; ++shift) {
++                    int rightPixelIndex = (w + shift < width) ? (w + shift) : (2 * (width - 1) - (w + shift));
++                    temp_pixel += (src[(w - shift) * 1 + 0] + src[rightPixelIndex * 1 + 0]) * kx[mid - shift];
++                }
++                dst[w * 1 + 0] = kpInternal::saturatingRoundingShiftRight<uint16_t>(temp_pixel, 8);  // 8
++            }
++        }
++    }
++    return;
++}
++
++static void gaussianBlurU8C3BDNx1(const uchar *src_data, size_t srcStep, uchar *dst_data, size_t dstStep, int width,
++    int height, const uint16_t *kx, int ksizeX)
++{
++    int nstripes =
++        std::min(std::max(static_cast<int>(static_cast<float>(height) * width / kpInternal::chunk), 1), height);
++
++#pragma omp parallel for proc_bind(close) num_threads(kpInternal::THREADS)
++    for (int i = 0; i < nstripes; ++i) {
++        int lineStart = static_cast<int>(static_cast<float>(height) / nstripes * i + 0.5);
++        int lineEnd = static_cast<int>(static_cast<float>(height) / nstripes * (i + 1) + 0.5);
++
++        for (int lineNum = lineStart; lineNum < lineEnd; ++lineNum) {
++            int edge = (ksizeX - 1) / 2;
++            int &mid = edge;
++            const uint8_t *src = src_data + srcStep * lineNum;
++            uint8_t *dst = dst_data + dstStep * lineNum;
++            int w = 0;
++            // left edge
++            for (; w < edge; ++w) {
++                uint16_t temp[3];
++                temp[0] = src[w * 3 + 0] * kx[mid];  // mid pixel 3
++                temp[1] = src[w * 3 + 1] * kx[mid];  // 3
++                temp[2] = src[w * 3 + 2] * kx[mid];  // 3 2
++
++                for (int shift = 1; shift <= edge; ++shift) {
++                    temp[0] += (src[abs(w - shift) * 3 + 0] + src[(w + shift) * 3 + 0]) * kx[mid - shift];  // 3
++                    temp[1] += (src[abs(w - shift) * 3 + 1] + src[(w + shift) * 3 + 1]) * kx[mid - shift];  // 3
++                    temp[2] += (src[abs(w - shift) * 3 + 2] + src[(w + shift) * 3 + 2]) * kx[mid - shift];  // 3 2
++                }
++                dst[w * 3 + 0] = kpInternal::saturatingRoundingShiftRight<uint16_t>(temp[0], 8);  // 3 8
++                dst[w * 3 + 1] = kpInternal::saturatingRoundingShiftRight<uint16_t>(temp[1], 8);  // 3 8
++                dst[w * 3 + 2] = kpInternal::saturatingRoundingShiftRight<uint16_t>(temp[2], 8);  // 3 8 2
++            }
++
++            // body part
++            w -= edge;
++            uint8x8x3_t vsrc1;  // current 8 pixels
++            uint8x8x3_t vsrc2;  // next 8 pixels
++            uint8x8x3_t result;
++            uint16x8x3_t temp;
++            uint16x8_t coef[8];
++
++            for (; w < width - (ksizeX + 8); w += 8) {  // 8
++                temp.val[0] = vdupq_n_u16(0);
++                temp.val[1] = temp.val[0];
++                temp.val[2] = temp.val[0];  // 2
++                int batch = 0;
++                vsrc1 = vld3_u8(src + (w + 8 * 0) * 3);                // 3 8
++                for (; batch < ksizeX / 8; ++batch) {                  // 8
++                    vsrc2 = vld3_u8(src + (w + 8 * (batch + 1)) * 3);  // 8 3
++
++                    coef[0] = vdupq_n_u16(kx[batch * 8 + 0]);  // 8
++                    coef[1] = vdupq_n_u16(kx[batch * 8 + 1]);  // 8
++                    coef[2] = vdupq_n_u16(kx[batch * 8 + 2]);  // 8 2
++                    coef[3] = vdupq_n_u16(kx[batch * 8 + 3]);  // 8 3
++                    coef[4] = vdupq_n_u16(kx[batch * 8 + 4]);  // 8 4
++                    coef[5] = vdupq_n_u16(kx[batch * 8 + 5]);  // 8 5
++                    coef[6] = vdupq_n_u16(kx[batch * 8 + 6]);  // 8 6
++                    coef[7] = vdupq_n_u16(kx[batch * 8 + 7]);  // 8 7
++
++                    temp.val[0] = vmlaq_u16(temp.val[0], vmovl_u8(vsrc1.val[0]), coef[0]);
++                    temp.val[1] = vmlaq_u16(temp.val[1], vmovl_u8(vsrc1.val[1]), coef[0]);
++                    temp.val[2] = vmlaq_u16(temp.val[2], vmovl_u8(vsrc1.val[2]), coef[0]);  // 2
++
++                    temp.val[0] = vmlaq_u16(temp.val[0], vmovl_u8(vext_u8(vsrc1.val[0], vsrc2.val[0], 1)), coef[1]);
++                    temp.val[1] = vmlaq_u16(temp.val[1], vmovl_u8(vext_u8(vsrc1.val[1], vsrc2.val[1], 1)), coef[1]);
++                    temp.val[2] =                                                                           // 2
++                        vmlaq_u16(temp.val[2], vmovl_u8(vext_u8(vsrc1.val[2], vsrc2.val[2], 1)), coef[1]);  // 2
++
++                    temp.val[0] =
++                        vmlaq_u16(temp.val[0], vmovl_u8(vext_u8(vsrc1.val[0], vsrc2.val[0], 2)), coef[2]);  // 2
++                    temp.val[1] =
++                        vmlaq_u16(temp.val[1], vmovl_u8(vext_u8(vsrc1.val[1], vsrc2.val[1], 2)), coef[2]);  // 2
++                    temp.val[2] =
++                        vmlaq_u16(temp.val[2], vmovl_u8(vext_u8(vsrc1.val[2], vsrc2.val[2], 2)), coef[2]);  // 2
++
++                    temp.val[0] =
++                        vmlaq_u16(temp.val[0], vmovl_u8(vext_u8(vsrc1.val[0], vsrc2.val[0], 3)), coef[3]);  // 3
++                    temp.val[1] =
++                        vmlaq_u16(temp.val[1], vmovl_u8(vext_u8(vsrc1.val[1], vsrc2.val[1], 3)), coef[3]);  // 3
++                    temp.val[2] =                                                                           // 2
++                        vmlaq_u16(temp.val[2], vmovl_u8(vext_u8(vsrc1.val[2], vsrc2.val[2], 3)), coef[3]);  // 3 2
++
++                    temp.val[0] =
++                        vmlaq_u16(temp.val[0], vmovl_u8(vext_u8(vsrc1.val[0], vsrc2.val[0], 4)), coef[4]);  // 4
++                    temp.val[1] =
++                        vmlaq_u16(temp.val[1], vmovl_u8(vext_u8(vsrc1.val[1], vsrc2.val[1], 4)), coef[4]);  // 4
++                    temp.val[2] =                                                                           // 2
++                        vmlaq_u16(temp.val[2], vmovl_u8(vext_u8(vsrc1.val[2], vsrc2.val[2], 4)), coef[4]);  // 4 2
++
++                    temp.val[0] =
++                        vmlaq_u16(temp.val[0], vmovl_u8(vext_u8(vsrc1.val[0], vsrc2.val[0], 5)), coef[5]);  // 5
++                    temp.val[1] =
++                        vmlaq_u16(temp.val[1], vmovl_u8(vext_u8(vsrc1.val[1], vsrc2.val[1], 5)), coef[5]);  // 5
++                    temp.val[2] =                                                                           // 2
++                        vmlaq_u16(temp.val[2], vmovl_u8(vext_u8(vsrc1.val[2], vsrc2.val[2], 5)), coef[5]);  // 5 2
++
++                    temp.val[0] =
++                        vmlaq_u16(temp.val[0], vmovl_u8(vext_u8(vsrc1.val[0], vsrc2.val[0], 6)), coef[6]);  // 6
++                    temp.val[1] =
++                        vmlaq_u16(temp.val[1], vmovl_u8(vext_u8(vsrc1.val[1], vsrc2.val[1], 6)), coef[6]);  // 6
++                    temp.val[2] =                                                                           // 2
++                        vmlaq_u16(temp.val[2], vmovl_u8(vext_u8(vsrc1.val[2], vsrc2.val[2], 6)), coef[6]);  // 6 2
++
++                    temp.val[0] =
++                        vmlaq_u16(temp.val[0], vmovl_u8(vext_u8(vsrc1.val[0], vsrc2.val[0], 7)), coef[7]);  // 7
++                    temp.val[1] =
++                        vmlaq_u16(temp.val[1], vmovl_u8(vext_u8(vsrc1.val[1], vsrc2.val[1], 7)), coef[7]);  // 7
++                    temp.val[2] =                                                                           // 2
++                        vmlaq_u16(temp.val[2], vmovl_u8(vext_u8(vsrc1.val[2], vsrc2.val[2], 7)), coef[7]);  // 7 2
++
++                    vsrc1 = vsrc2;
++                }
++
++                for (int ki = batch * 8; ki < ksizeX; ++ki) {
++                    coef[0] = vdupq_n_u16(kx[ki]);
++                    vsrc1 = vld3_u8(src + (w + ki) * 3);  // 3
++
++                    temp.val[0] = vmlaq_u16(temp.val[0], vmovl_u8(vsrc1.val[0]), coef[0]);
++                    temp.val[1] = vmlaq_u16(temp.val[1], vmovl_u8(vsrc1.val[1]), coef[0]);
++                    temp.val[2] = vmlaq_u16(temp.val[2], vmovl_u8(vsrc1.val[2]), coef[0]);  // 2
++                }
++
++                result.val[0] = vqrshrn_n_u16(temp.val[0], 8);  // 8
++                result.val[1] = vqrshrn_n_u16(temp.val[1], 8);  // 8
++                result.val[2] = vqrshrn_n_u16(temp.val[2], 8);  // 8 2
++                vst3_u8(dst + (w + edge) * 3, result);          // 3
++            }
++
++            // right edge
++            w += edge;
++            for (; w < width; ++w) {
++                uint16_t temp_pixel[3];
++                temp_pixel[0] = src[w * 3 + 0] * kx[mid];  // mid pixel 3
++                temp_pixel[1] = src[w * 3 + 1] * kx[mid];  // 3
++                temp_pixel[2] = src[w * 3 + 2] * kx[mid];  // 3 2
++
++                for (int shift = 1; shift <= edge; ++shift) {
++                    int rightPixelIndex = (w + shift < width) ? (w + shift) : (2 * (width - 1) - (w + shift));     // 2
++                    temp_pixel[0] += (src[(w - shift) * 3 + 0] + src[rightPixelIndex * 3 + 0]) * kx[mid - shift];  // 3
++                    temp_pixel[1] += (src[(w - shift) * 3 + 1] + src[rightPixelIndex * 3 + 1]) * kx[mid - shift];  // 3
++                    // 3 2
++                    temp_pixel[2] += (src[(w - shift) * 3 + 2] + src[rightPixelIndex * 3 + 2]) * kx[mid - shift];
++                }
++                dst[w * 3 + 0] = kpInternal::saturatingRoundingShiftRight<uint16_t>(temp_pixel[0], 8);  // 3 8
++                dst[w * 3 + 1] = kpInternal::saturatingRoundingShiftRight<uint16_t>(temp_pixel[1], 8);  // 3 8
++                // 3 8 2
++                dst[w * 3 + 2] = kpInternal::saturatingRoundingShiftRight<uint16_t>(temp_pixel[2], 8);
++            }
++        }
++    }
++    return;
++}
++
++static void gaussianBlurU8C1BD1xN(const uchar *src_data, size_t srcStep, uchar *dst_data, size_t dstStep, int width,
++    int height, const uint16_t *ky, int ksizeY)
++{
++    int nstripes =
++        std::min(std::max(static_cast<int>(static_cast<float>(height) * width / kpInternal::chunk), 1), height);
++
++#pragma omp parallel for proc_bind(close) num_threads(kpInternal::THREADS)
++    for (int i = 0; i < nstripes; ++i) {
++        int lineStart = static_cast<int>(static_cast<float>(height) / nstripes * i + 0.5);
++        int lineEnd = static_cast<int>(static_cast<float>(height) / nstripes * (i + 1) + 0.5);
++
++        for (int lineNum = lineStart; lineNum < lineEnd; ++lineNum) {
++            uint8x8_t rowUp0;
++            uint8x8_t rowUp1;
++            uint8x8_t rowDown0;
++            uint8x8_t rowDown1;
++            uint16x8_t temp0;
++            uint16x8_t temp1;
++            uint8x8_t result0;
++            uint8x8_t result1;
++            uint16x8_t coef;
++
++            int w = 0;
++            int mid = ksizeY / 2;
++            for (; w < width - 16; w += 16) {  // 16
++                rowUp0 = vld1_u8(src_data + lineNum * srcStep + w * 1);
++                rowUp1 = vld1_u8(src_data + lineNum * srcStep + (w + 8) * 1);  // 8
++                coef = vdupq_n_u16(ky[mid]);
++                temp0 = vmulq_u16(vmovl_u8(rowUp0), coef);
++                temp1 = vmulq_u16(vmovl_u8(rowUp1), coef);
++
++                for (int shift = 1; shift < (ksizeY + 1) / 2; ++shift) {  // 2
++                    int rowUpIndex = abs(lineNum - shift);
++                    int rowDownIndex =
++                        (lineNum + shift < height) ? (lineNum + shift) : (2 * (height - 1) - (lineNum + shift));
++                    rowUp0 = vld1_u8(src_data + rowUpIndex * srcStep + w * 1);
++                    rowUp1 = vld1_u8(src_data + rowUpIndex * srcStep + (w + 8) * 1);  // 8
++                    rowDown0 = vld1_u8(src_data + rowDownIndex * srcStep + w * 1);
++                    rowDown1 = vld1_u8(src_data + rowDownIndex * srcStep + (w + 8) * 1);  // 8
++                    coef = vdupq_n_u16(ky[mid + shift]);
++
++                    temp0 = vmlaq_u16(temp0, vaddq_u16(vmovl_u8(rowUp0), vmovl_u8(rowDown0)), coef);
++                    temp1 = vmlaq_u16(temp1, vaddq_u16(vmovl_u8(rowUp1), vmovl_u8(rowDown1)), coef);
++                }
++
++                result0 = vqrshrn_n_u16(temp0, 8);  // 8
++                result1 = vqrshrn_n_u16(temp1, 8);  // 8
++
++                vst1_u8(dst_data + lineNum * dstStep + w * 1, result0);
++                vst1_u8(dst_data + lineNum * dstStep + (w + 8) * 1, result1);  // 8
++            }
++
++            for (; w < width; ++w) {
++                uint16_t result;
++                const uint8_t *pixelUp;
++                const uint8_t *pixelDown;
++                const uint8_t *pixelMid;
++                uint8_t *dstPixel;
++
++                uint16_t coef_single = ky[mid];
++                pixelMid = src_data + lineNum * srcStep + w * 1;
++                result = coef_single * static_cast<uint16_t>(pixelMid[0]);
++
++                for (int shift = 1; shift < (ksizeY + 1) / 2; ++shift) {  // 2
++                    int rowUpIndex = abs(lineNum - shift);
++                    int rowDownIndex =
++                        (lineNum + shift < height) ? (lineNum + shift) : (2 * (height - 1) - (lineNum + shift));
++                    coef_single = ky[mid + shift];
++                    pixelUp = src_data + rowUpIndex * srcStep + w * 1;
++                    pixelDown = src_data + rowDownIndex * srcStep + w * 1;
++                    result += (static_cast<uint16_t>(pixelUp[0]) + static_cast<uint16_t>(pixelDown[0])) * coef_single;
++                }
++                dstPixel = dst_data + lineNum * dstStep + w * 1;
++                dstPixel[0] = kpInternal::saturatingRoundingShiftRight<uint16_t>(result, 8);  // 8
++            }
++        }
++    }
++}
++
++static void gaussianBlurU8C3BD1xN(const uchar *src_data, size_t srcStep, uchar *dst_data, size_t dstStep, int width,
++    int height, const uint16_t *ky, int ksizeY)
++{
++    int nstripes =
++        std::min(std::max(static_cast<int>(static_cast<float>(height) * width / kpInternal::chunk), 1), height);
++
++#pragma omp parallel for proc_bind(close) num_threads(kpInternal::THREADS)
++    for (int i = 0; i < nstripes; ++i) {
++        int lineStart = static_cast<int>(static_cast<float>(height) / nstripes * i + 0.5);
++        int lineEnd = static_cast<int>(static_cast<float>(height) / nstripes * (i + 1) + 0.5);
++
++        for (int lineNum = lineStart; lineNum < lineEnd; ++lineNum) {
++            uint8x8x3_t rowUp0;
++            uint8x8x3_t rowUp1;
++            uint8x8x3_t rowDown0;
++            uint8x8x3_t rowDown1;
++            uint16x8x3_t temp0;
++            uint16x8x3_t temp1;
++            uint8x8x3_t result0;
++            uint8x8x3_t result1;
++            uint16x8_t coef;
++
++            int w = 0;
++            int mid = ksizeY / 2;
++            for (; w < width - 16; w += 16) {                                  // 16
++                rowUp0 = vld3_u8(src_data + lineNum * srcStep + w * 3);        // 3
++                rowUp1 = vld3_u8(src_data + lineNum * srcStep + (w + 8) * 3);  // 3 8
++                coef = vdupq_n_u16(ky[mid]);
++                temp0.val[0] = vmulq_u16(vmovl_u8(rowUp0.val[0]), coef);
++                temp0.val[1] = vmulq_u16(vmovl_u8(rowUp0.val[1]), coef);
++                temp0.val[2] = vmulq_u16(vmovl_u8(rowUp0.val[2]), coef);  // 2
++                temp1.val[0] = vmulq_u16(vmovl_u8(rowUp1.val[0]), coef);
++                temp1.val[1] = vmulq_u16(vmovl_u8(rowUp1.val[1]), coef);
++                temp1.val[2] = vmulq_u16(vmovl_u8(rowUp1.val[2]), coef);  // 2
++
++                for (int shift = 1; shift < (ksizeY + 1) / 2; ++shift) {  // 2
++                    int rowUpIndex = abs(lineNum - shift);
++                    int rowDownIndex =
++                        (lineNum + shift < height) ? (lineNum + shift) : (2 * (height - 1) - (lineNum + shift));
++                    rowUp0 = vld3_u8(src_data + rowUpIndex * srcStep + w * 3);            // 3
++                    rowUp1 = vld3_u8(src_data + rowUpIndex * srcStep + (w + 8) * 3);      // 8 3
++                    rowDown0 = vld3_u8(src_data + rowDownIndex * srcStep + w * 3);        // 3
++                    rowDown1 = vld3_u8(src_data + rowDownIndex * srcStep + (w + 8) * 3);  // 8 3
++                    coef = vdupq_n_u16(ky[mid + shift]);
++
++                    temp0.val[0] =
++                        vmlaq_u16(temp0.val[0], vaddq_u16(vmovl_u8(rowUp0.val[0]), vmovl_u8(rowDown0.val[0])), coef);
++                    temp0.val[1] =
++                        vmlaq_u16(temp0.val[1], vaddq_u16(vmovl_u8(rowUp0.val[1]), vmovl_u8(rowDown0.val[1])), coef);
++                    // 2
++                    temp0.val[2] = vmlaq_u16(
++                        temp0.val[2], vaddq_u16(vmovl_u8(rowUp0.val[2]), vmovl_u8(rowDown0.val[2])), coef);  // 2
++                    temp1.val[0] =
++                        vmlaq_u16(temp1.val[0], vaddq_u16(vmovl_u8(rowUp1.val[0]), vmovl_u8(rowDown1.val[0])), coef);
++                    temp1.val[1] =
++                        vmlaq_u16(temp1.val[1], vaddq_u16(vmovl_u8(rowUp1.val[1]), vmovl_u8(rowDown1.val[1])), coef);
++                    // 2
++                    temp1.val[2] = vmlaq_u16(
++                        temp1.val[2], vaddq_u16(vmovl_u8(rowUp1.val[2]), vmovl_u8(rowDown1.val[2])), coef);  // 2
++                }
++
++                result0.val[0] = vqrshrn_n_u16(temp0.val[0], 8);  // 8
++                result0.val[1] = vqrshrn_n_u16(temp0.val[1], 8);  // 8
++                result0.val[2] = vqrshrn_n_u16(temp0.val[2], 8);  // 8 2
++                result1.val[0] = vqrshrn_n_u16(temp1.val[0], 8);  // 8
++                result1.val[1] = vqrshrn_n_u16(temp1.val[1], 8);  // 8
++                result1.val[2] = vqrshrn_n_u16(temp1.val[2], 8);  // 8 2
++
++                vst3_u8(dst_data + lineNum * dstStep + w * 3, result0);        // 3
++                vst3_u8(dst_data + lineNum * dstStep + (w + 8) * 3, result1);  // 3 8
++            }
++
++            for (; w < width; ++w) {
++                uint16_t result[3];
++                const uint8_t *pixelUp;
++                const uint8_t *pixelDown;
++                const uint8_t *pixelMid;
++                uint8_t *dstPixel;
++
++                uint16_t coef_single = ky[mid];
++                pixelMid = src_data + lineNum * srcStep + w * 3;  // 3
++                result[0] = coef_single * static_cast<uint16_t>(pixelMid[0]);
++                result[1] = coef_single * static_cast<uint16_t>(pixelMid[1]);
++                result[2] = coef_single * static_cast<uint16_t>(pixelMid[2]);  // 2
++
++                for (int shift = 1; shift < (ksizeY + 1) / 2; ++shift) {  // 2
++                    int rowUpIndex = abs(lineNum - shift);
++                    int rowDownIndex =
++                        (lineNum + shift < height) ? (lineNum + shift) : (2 * (height - 1) - (lineNum + shift));
++                    coef_single = ky[mid + shift];
++                    pixelUp = src_data + rowUpIndex * srcStep + w * 3;      // 3
++                    pixelDown = src_data + rowDownIndex * srcStep + w * 3;  // 3
++                    result[0] +=
++                        (static_cast<uint16_t>(pixelUp[0]) + static_cast<uint16_t>(pixelDown[0])) * coef_single;
++                    result[1] +=
++                        (static_cast<uint16_t>(pixelUp[1]) + static_cast<uint16_t>(pixelDown[1])) * coef_single;
++                    result[2] +=                                                                                  // 2
++                        (static_cast<uint16_t>(pixelUp[2]) + static_cast<uint16_t>(pixelDown[2])) * coef_single;  // 2
++                }
++                dstPixel = dst_data + lineNum * dstStep + w * 3;                                 // 3
++                dstPixel[0] = kpInternal::saturatingRoundingShiftRight<uint16_t>(result[0], 8);  // 8
++                dstPixel[1] = kpInternal::saturatingRoundingShiftRight<uint16_t>(result[1], 8);  // 8
++                dstPixel[2] = kpInternal::saturatingRoundingShiftRight<uint16_t>(result[2], 8);  // 8 2
++            }
++        }
++    }
++}
++
++static inline uint16x8x3_t vGaussianBlur3Naba(
++    const uint8_t *srcRow0, const uint8_t *srcRow1, const uint8_t *srcRow2, int w, const uint16_t *ky)
++{
++    uint16x8x3_t vConvResult;
++
++    uint8x8x3_t rgbRow0 = vld3_u8(srcRow0 + w * 3);
++    uint8x8x3_t rgbRow1 = vld3_u8(srcRow1 + w * 3);
++    uint8x8x3_t rgbRow2 = vld3_u8(srcRow2 + w * 3);
++
++    uint16x8_t kmid = vdupq_n_u16(ky[1]);
++    uint16x8_t kside = vdupq_n_u16(ky[0]);
++
++    vConvResult.val[0] = vmulq_u16(vmovl_u8(rgbRow0.val[0]), kside);
++    vConvResult.val[1] = vmulq_u16(vmovl_u8(rgbRow0.val[1]), kside);
++    vConvResult.val[2] = vmulq_u16(vmovl_u8(rgbRow0.val[2]), kside);  // 2
++
++    vConvResult.val[0] = vmlaq_u16(vConvResult.val[0], vmovl_u8(rgbRow1.val[0]), kmid);
++    vConvResult.val[1] = vmlaq_u16(vConvResult.val[1], vmovl_u8(rgbRow1.val[1]), kmid);
++    vConvResult.val[2] = vmlaq_u16(vConvResult.val[2], vmovl_u8(rgbRow1.val[2]), kmid);  // 2
++
++    vConvResult.val[0] = vmlaq_u16(vConvResult.val[0], vmovl_u8(rgbRow2.val[0]), kside);
++    vConvResult.val[1] = vmlaq_u16(vConvResult.val[1], vmovl_u8(rgbRow2.val[1]), kside);
++    vConvResult.val[2] = vmlaq_u16(vConvResult.val[2], vmovl_u8(rgbRow2.val[2]), kside);  // 2
++
++    return vConvResult;
++}
++
++static inline uint8x8x3_t hGaussianBlur3Naba(
++    const uint16x8x3_t rgb_current, const uint16x8x3_t rgb_next, const uint16_t *kx)
++{
++    uint8x8x3_t bluredResult;
++
++    uint16x8x3_t rgb_p1;
++    uint16x8x3_t rgb_p2;
++    uint16x8x3_t rgb_p3;
++
++    uint16x4_t kmid = vdup_n_u16(kx[1]);
++    uint16x4_t kside = vdup_n_u16(kx[0]);
++
++    rgb_p1 = rgb_current;
++    rgb_p2.val[0] = vextq_u16(rgb_current.val[0], rgb_next.val[0], 1);
++    rgb_p2.val[1] = vextq_u16(rgb_current.val[1], rgb_next.val[1], 1);
++    rgb_p2.val[2] = vextq_u16(rgb_current.val[2], rgb_next.val[2], 1);  // 2
++    rgb_p3.val[0] = vextq_u16(rgb_current.val[0], rgb_next.val[0], 2);  // 2
++    rgb_p3.val[1] = vextq_u16(rgb_current.val[1], rgb_next.val[1], 2);  // 2
++    rgb_p3.val[2] = vextq_u16(rgb_current.val[2], rgb_next.val[2], 2);  // 2
++
++    bluredResult.val[0] = gaussianBlurU8C3BD1x3Kernal(rgb_p1.val[0], rgb_p2.val[0], rgb_p3.val[0], kside, kmid, kside);
++    bluredResult.val[1] = gaussianBlurU8C3BD1x3Kernal(rgb_p1.val[1], rgb_p2.val[1], rgb_p3.val[1], kside, kmid, kside);
++    bluredResult.val[2] =                                                                              // 2
++        gaussianBlurU8C3BD1x3Kernal(rgb_p1.val[2], rgb_p2.val[2], rgb_p3.val[2], kside, kmid, kside);  // 2
++
++    return bluredResult;
++}
++
++static void gaussianBlurU8C3BD3x3combine(const uchar *src_data, size_t srcStep, uchar *dst_data, size_t dstStep,
++    int width, int height, const uint16_t *kx, const uint16_t *ky)
++{
++    int nstripes =
++        std::min(std::max(static_cast<int>(static_cast<float>(height) * width / kpInternal::chunk), 1), height);
++
++#pragma omp parallel for proc_bind(close) num_threads(kpInternal::THREADS)
++    for (int i = 0; i < nstripes; ++i) {  // parallel region
++        int lineStart = static_cast<int>(static_cast<float>(height) / nstripes * i + 0.5);
++        int lineEnd = static_cast<int>(static_cast<float>(height) / nstripes * (i + 1) + 0.5);
++
++        const uint8_t *srcRow0;
++        const uint8_t *srcRow1 = src_data + srcStep * lineStart;
++        const uint8_t *srcRow2;
++
++        if (lineStart) {
++            srcRow0 = src_data + srcStep * (lineStart - 1);
++        } else {
++            srcRow0 = src_data + srcStep * (lineStart + 1);
++        }
++
++        if (lineStart == height - 1) {
++            srcRow2 = src_data + srcStep * (lineStart - 1);
++        } else {
++            srcRow2 = src_data + srcStep * (lineStart + 1);
++        }
++
++        for (int lineNum = lineStart; lineNum < lineEnd; ++lineNum) {
++            uint8_t *dst_row = dst_data + dstStep * lineNum;
++            // do horizontal convolution
++            int reminder = width % 8;
++            int tailStart = width - reminder;
++            // first pixel
++            for (int c = 0; c < 3; ++c) {  // 3
++                uint32_t temp0 = (static_cast<uint32_t>(srcRow0[c]) + static_cast<uint32_t>(srcRow2[c])) * ky[0] +
++                                 static_cast<uint32_t>(srcRow1[c]) * ky[1];
++                // first pixel vertical cov
++                uint32_t temp1 =
++                    (static_cast<uint32_t>(srcRow0[c + 3]) + static_cast<uint32_t>(srcRow2[c + 3])) * ky[0] +
++                    static_cast<uint32_t>(srcRow1[c + 3]) * ky[1];
++                // second pixel vertical cov
++                dst_row[c] =
++                    kpInternal::saturatingRoundingShiftRight<uint32_t>(temp0 * kx[1] + temp1 * kx[0] * 2, 16);  // 2 16
++            }
++            // body loop
++            int w = 0;
++            uint16x8x3_t vConvCurr = vGaussianBlur3Naba(srcRow0, srcRow1, srcRow2, w, ky);
++            uint16x8x3_t vConvNext;
++            for (; w < tailStart - 8; w += 8) {                                        // 8
++                __builtin_prefetch(srcRow0 + (w + 8) * 3);                             // 8 3
++                __builtin_prefetch(srcRow1 + (w + 8) * 3);                             // 8 3
++                __builtin_prefetch(srcRow2 + (w + 8) * 3);                             // 8 3
++                vConvNext = vGaussianBlur3Naba(srcRow0, srcRow1, srcRow2, w + 8, ky);  // 8
++                uint8x8x3_t bluredResult = hGaussianBlur3Naba(vConvCurr, vConvNext, kx);
++                vst3_u8(dst_row + (w + 1) * 3, bluredResult);  // 3
++                vConvCurr = vConvNext;
++            }
++            // tail process
++            uint32_t bluredPrev[3];
++            uint32_t bluredCurr[3];
++            uint32_t bluredNext[3];
++            --w;
++            // 3
++            bluredPrev[0] = (static_cast<uint32_t>(srcRow0[w * 3]) + static_cast<uint32_t>(srcRow2[w * 3])) * ky[0] +
++                            static_cast<uint32_t>(srcRow1[w * 3]) * ky[1];  // 3
++            bluredPrev[1] =
++                (static_cast<uint32_t>(srcRow0[w * 3 + 1]) + static_cast<uint32_t>(srcRow2[w * 3 + 1])) * ky[0] +  // 3
++                static_cast<uint32_t>(srcRow1[w * 3 + 1]) * ky[1];                                                 // 3
++            // 2 3
++            bluredPrev[2] = (static_cast<uint32_t>(srcRow0[w * 3 + 2]) + static_cast<uint32_t>(srcRow2[w * 3 + 2])) *
++                                ky[0] +                                         // 2 3
++                            static_cast<uint32_t>(srcRow1[w * 3 + 2]) * ky[1];  // 3 2
++            ++w;
++            // 3
++            bluredCurr[0] = (static_cast<uint32_t>(srcRow0[w * 3]) + static_cast<uint32_t>(srcRow2[w * 3])) * ky[0] +
++                            static_cast<uint32_t>(srcRow1[w * 3]) * ky[1];  // 3
++            bluredCurr[1] =
++                (static_cast<uint32_t>(srcRow0[w * 3 + 1]) + static_cast<uint32_t>(srcRow2[w * 3 + 1])) * ky[0] +  // 3
++                static_cast<uint32_t>(srcRow1[w * 3 + 1]) * ky[1];                                                 // 3
++            bluredCurr[2] =                                                                                        // 2
++                (static_cast<uint32_t>(srcRow0[w * 3 + 2]) + static_cast<uint32_t>(srcRow2[w * 3 + 2])) * // 2 3
++                    ky[0] +                                         // 2 3
++                static_cast<uint32_t>(srcRow1[w * 3 + 2]) * ky[1];  // 3 2
++
++            for (; w < width - 1; ++w) {
++                bluredNext[0] =
++                    (static_cast<uint32_t>(srcRow0[(w + 1) * 3]) + static_cast<uint32_t>(srcRow2[(w + 1) * 3])) *  // 3
++                        ky[0] +
++                    static_cast<uint32_t>(srcRow1[(w + 1) * 3]) * ky[1];                // 3
++                bluredNext[1] = (static_cast<uint32_t>(srcRow0[(w + 1) * 3 + 1]) +      // 3
++                                    static_cast<uint32_t>(srcRow2[(w + 1) * 3 + 1])) *  // 3
++                                    ky[0] +
++                                static_cast<uint32_t>(srcRow1[(w + 1) * 3 + 1]) * ky[1];  // 3
++                bluredNext[2] = (static_cast<uint32_t>(srcRow0[(w + 1) * 3 + 2]) +        // 3 2
++                                    static_cast<uint32_t>(srcRow2[(w + 1) * 3 + 2])) *    // 3 2
++                                    ky[0] +
++                                static_cast<uint32_t>(srcRow1[(w + 1) * 3 + 2]) * ky[1];  // 3 2
++                dst_row[w * 3] = kpInternal::saturatingRoundingShiftRight<uint32_t>(
++                    bluredCurr[0] * kx[1] + (bluredPrev[0] + bluredNext[0]) * kx[0], 16);  // 3 16
++                dst_row[w * 3 + 1] = kpInternal::saturatingRoundingShiftRight<uint32_t>(
++                    bluredCurr[1] * kx[1] + (bluredPrev[1] + bluredNext[1]) * kx[0], 16);  // 3 16
++                // 2 3
++                dst_row[w * 3 + 2] = kpInternal::saturatingRoundingShiftRight<uint32_t>(
++                    bluredCurr[2] * kx[1] + (bluredPrev[2] + bluredNext[2]) * kx[0], 16);  // 3 2 16
++
++                std::copy(bluredCurr, bluredCurr + 3, bluredPrev);  // 3
++                std::copy(bluredNext, bluredNext + 3, bluredCurr);  // 3
++            }
++            // last pixel 3
++            dst_row[w * 3] = kpInternal::saturatingRoundingShiftRight<uint32_t>(
++                bluredCurr[0] * kx[1] + (bluredPrev[0]) * kx[0] * 2, 16);  // 3 2 16
++            dst_row[w * 3 + 1] = kpInternal::saturatingRoundingShiftRight<uint32_t>(
++                bluredCurr[1] * kx[1] + (bluredPrev[1]) * kx[0] * 2, 16);  // 3 2 16
++            dst_row[w * 3 + 2] = kpInternal::saturatingRoundingShiftRight<uint32_t>(
++                bluredCurr[2] * kx[1] + (bluredPrev[2]) * kx[0] * 2, 16);  // 3 2 16
++            // next loop value
++            srcRow0 = srcRow1;
++            srcRow1 = srcRow2;
++            if (lineNum + 1 == height - 1) {
++                srcRow2 = srcRow0;
++            } else {
++                srcRow2 = srcRow2 + srcStep * 1;
++            }
++        }
++    }
++}
++
++static void gaussianBlurU8C3BD(const uchar *src_data, size_t srcStep, uchar *dst_data, size_t dstStep, int width,
++    int height, const uint16_t *kx, int ksizeX, const uint16_t *ky, int ksizeY, int cn)
++{
++    // combined method
++    if (ksizeX == 3 && ksizeY == 3 && cn == 3) {  // 3
++        gaussianBlurU8C3BD3x3combine(src_data, srcStep, dst_data, dstStep, width, height, kx, ky);
++        return;
++    } else if (ksizeY == 1 && cn == 3) {  // 3
++        gaussianBlurU8C3BDNx1(src_data, srcStep, dst_data, dstStep, width, height, kx, ksizeX);
++        return;
++    } else if (ksizeY == 1 && cn == 1) {
++        gaussianBlurU8C1BDNx1(src_data, srcStep, dst_data, dstStep, width, height, kx, ksizeX);
++        return;
++    } else if (ksizeX == 1 && cn == 3) {  // 3
++        gaussianBlurU8C3BD1xN(src_data, srcStep, dst_data, dstStep, width, height, ky, ksizeY);
++        return;
++    } else if (ksizeX == 1 && cn == 1) {
++        gaussianBlurU8C1BD1xN(src_data, srcStep, dst_data, dstStep, width, height, ky, ksizeY);
++        return;
++    }
++}
++
++static void KP_ACC_gaussianBlur(const uchar *src_data, size_t srcStep, uchar *dst_data, size_t dstStep, int width, int height,
++    int depth, int cn, size_t marginLeft, size_t marginTop, size_t marginRight, size_t marginBottom, size_t ksizeX,
++    size_t ksizeY, double sigma1, double sigma2, int borderType)
++{
++    std::vector<ufixedpoint16> fkx;
++    std::vector<ufixedpoint16> fky;
++    cv::Size kernel_size(ksizeX, ksizeY);
++    int type = CV_8U;
++    createGaussianKernels(fkx, fky, type, kernel_size, sigma1, sigma2);
++    auto rmZeros = [](std::vector<ufixedpoint16> &vec) {
++        std::size_t n = 0;
++        for (; n < (vec.size() - 1) / 2; n++) {
++            if (vec[n].raw() != 0)
++                break;
++        }
++        if (n != 0) {
++            vec.erase(vec.end() - n, vec.end());
++            vec.erase(vec.begin(), vec.begin() + n);
++        }
++    };
++    rmZeros(fkx);
++    rmZeros(fky);
++    // U8: u_int8_t    C3: cn == 3    BD: Border Default
++    gaussianBlurU8C3BD(src_data,
++        srcStep,
++        dst_data,
++        dstStep,
++        width,
++        height,
++        (const uint16_t *)&fkx[0],
++        (int)fkx.size(),
++        (const uint16_t *)&fky[0],
++        (int)fky.size(),
++        cn);
++    (void)marginLeft;
++    (void)marginTop;
++    (void)marginRight;
++    (void)marginBottom;
++    (void)depth;
++    (void)borderType;
++}
++
++static inline bool IsSupportedGaussianBlurU8(
++    int ksizeX, int ksizeY, int borderType, int cn, int depth, int width, int height)
++{
++    if (borderType == BORDER_DEFAULT && depth == CV_8U && ((ksizeX % 2) == 1) && ((ksizeY % 2) == 1)) {  // 2
++        if (ksizeX > 10 && ksizeY == 1 && (cn == 3 || cn == 1) && width > ksizeX) {                 // 3 10
++            return true;
++        }
++        if (ksizeX == 1 && ksizeY > 10 && (cn == 3 || cn == 1) && height > ksizeY) {  // 3 10
++            return true;
++        }
++        if (width > ksizeX && height > ksizeY && cn == 3) {  // 3
++            if (ksizeX == 3 && ksizeY == 3) {
++                return true;  // 3
++            }
++        }
++        return false;
++    }
++    return false;
++}
++
++static int kcv_GaussianBlur(InputArray _src, OutputArray _dst, Size ksize, double sigma1, double sigma2, int borderType)
++{
++    if (_src.empty()) {
++        return 1;
++    }
++    Size size = _src.size();
++    bool isSupport = IsSupportedGaussianBlurU8(ksize.width, ksize.height, borderType,
++        CV_MAT_CN(_src.type()), CV_MAT_DEPTH(_src.type()), size.width, size.height);
++    if (!isSupport) {
++        return 2;
++    }
++    int type = _src.type();
++    _dst.create(size, type);
++    if ((borderType & ~BORDER_ISOLATED) != BORDER_CONSTANT &&
++        ((borderType & BORDER_ISOLATED) != 0 || !_src.getMat().isSubmatrix())) {
++        if (size.height == 1)
++            ksize.height = 1;
++        if (size.width == 1)
++            ksize.width = 1;
++    }
++    if (ksize.width == 1 && ksize.height == 1) {
++        _src.copyTo(_dst);
++        return 0;
++    }
++    if (sigma2 <= 0) {
++        sigma2 = sigma1;
++    }
++    int sdepth = CV_MAT_DEPTH(type);
++    int cn = CV_MAT_CN(type);
++    Mat kx;
++    Mat ky;
++    Mat src = _src.getMat();
++    Mat dst = _dst.getMat();
++    Size wsz(src.cols, src.rows);
++    Point ofs;
++    if (!(borderType & BORDER_ISOLATED))
++        src.locateROI(wsz, ofs);
++    if (sdepth == CV_8U && ((borderType & BORDER_ISOLATED) || !_src.isSubmatrix())) {
++        if (src.data == dst.data)
++            src = src.clone();
++        KP_ACC_gaussianBlur(src.ptr(), src.step, dst.ptr(), dst.step, src.cols, src.rows,
++            sdepth, cn, ofs.x, ofs.y, wsz.width - src.cols - ofs.x,
++            wsz.height - src.rows - ofs.y, ksize.width, ksize.height, sigma1, sigma2,
++            borderType & ~BORDER_ISOLATED);
++    }
++    return 0;
++}
++
+ void GaussianBlur(InputArray _src, OutputArray _dst, Size ksize,
+                   double sigma1, double sigma2,
+                   int borderType)
+ {
++    int retcode = kcv_GaussianBlur(_src, _dst, ksize, sigma1, sigma2, borderType);
++    if(retcode == 0 || retcode == 1)
++        return;
+     CV_INSTRUMENT_REGION();
+ 
+     CV_Assert(!_src.empty());
+diff -Naur org/opencv/modules/imgproc/src/thresh.cpp opencv/modules/imgproc/src/thresh.cpp
+--- org/opencv/modules/imgproc/src/thresh.cpp	2026-06-24 12:31:00.331950475 +0800
++++ opencv/modules/imgproc/src/thresh.cpp	2026-06-12 14:49:06.244120037 +0800
+@@ -1537,8 +1537,105 @@
+ 
+ }
+ 
++namespace cv {
++static void threshold_32F(InputArray _src, OutputArray _dst, double thresh, double maxval, int type)
++{
++    if (type != THRESH_BINARY) {
++        return;
++    }
++    Mat src = _src.getMat();
++    _dst.create(src.size(), src.type());
++    Mat dst = _dst.getMat();
++    const float *srcptr = src.ptr<float>();
++    float *dstptr = dst.ptr<float>();
++    int len = src.total() * src.channels();
++    float32x4_t v_thresh = vdupq_n_f32(thresh);
++    float32x4_t v_maxval = vdupq_n_f32(maxval);
++    float32x4_t v_zero = vdupq_n_f32(0.0f);
++    constexpr int neonStep = 4;  // 4 128/32
++    constexpr int unrollFactor = 4;  // 循环展开因子
++    constexpr int neontmp = neonStep * unrollFactor;
++#pragma omp parallel for schedule(auto) num_threads(48)
++    for (int i = 0; i <= len - neontmp; i += neontmp) {
++        float32x4_t v_src0 = vld1q_f32(srcptr + i + 0 * neonStep);
++        uint32x4_t v_mask0 = vcgtq_f32(v_src0, v_thresh);
++        float32x4_t v_dst0 = vbslq_f32(v_mask0, v_maxval, v_zero);
++        vst1q_f32(dstptr + i + 0 * neonStep, v_dst0);
++
++        float32x4_t v_src1 = vld1q_f32(srcptr + i + 1 * neonStep);
++        uint32x4_t v_mask1 = vcgtq_f32(v_src1, v_thresh);
++        float32x4_t v_dst1 = vbslq_f32(v_mask1, v_maxval, v_zero);
++        vst1q_f32(dstptr + i + 1 * neonStep, v_dst1);
++
++        float32x4_t v_src2 = vld1q_f32(srcptr + i + 2 * neonStep);
++        uint32x4_t v_mask2 = vcgtq_f32(v_src2, v_thresh);
++        float32x4_t v_dst2 = vbslq_f32(v_mask2, v_maxval, v_zero);
++        vst1q_f32(dstptr + i + 2 * neonStep, v_dst2);
++
++        float32x4_t v_src3 = vld1q_f32(srcptr + i + 3 * neonStep);
++        uint32x4_t v_mask3 = vcgtq_f32(v_src3, v_thresh);
++        float32x4_t v_dst3 = vbslq_f32(v_mask3, v_maxval, v_zero);
++        vst1q_f32(dstptr + i + 3 * neonStep, v_dst3);
++    }
++    for (int i = len - len % neonStep; i < len; i++) {
++        dstptr[i] = (srcptr[i] > thresh) ? maxval : 0;
++    }
++}
++
++static void threshold_8U(InputArray _src, OutputArray _dst, double thresh, double maxval, int type)
++{
++    if (type != THRESH_BINARY) {
++        return;
++    }
++    Mat src = _src.getMat();
++    _dst.create(src.size(), src.type());
++    Mat dst = _dst.getMat();
++    const uchar *srcptr = src.ptr();
++    uchar *dstptr = dst.ptr();
++    int len = src.total() * src.channels();
++    uchar uThresh = (uchar)thresh;
++    uchar uMaxval = (uchar)maxval;
++    uint8x16_t v_thresh = vdupq_n_u8(uThresh);
++    uint8x16_t v_maxval = vdupq_n_u8(uMaxval);
++    constexpr int neonStep = 16;  // 16 128/8
++#pragma omp parallel for num_threads(20)
++    for (int i = 0; i <= len - neonStep; i += neonStep) {
++        uint8x16_t v_src = vld1q_u8(srcptr + i);
++        v_src = vcltq_u8(v_thresh, v_src);
++        uint8x16_t v_dst = vandq_u8(v_src, v_maxval);
++        vst1q_u8(dstptr + i, v_dst);
++    }
++
++    for (int i = len - len % neonStep; i < len; i++) {
++        dstptr[i] = (srcptr[i] > uThresh) ? uMaxval : 0;
++    }
++}
++
++static int kcv_threshold(InputArray _src, OutputArray _dst, double thresh, double maxval, int type)
++{
++    if(_src.empty()){
++        return 1;
++    }
++    if(!(CV_MAT_DEPTH(_src.type()) == CV_8U ||
++        CV_MAT_DEPTH(_src.type()) == CV_32F)){
++        return 2;
++    }
++    if(type != THRESH_BINARY){
++        return 2;
++    }
++    if (CV_MAT_DEPTH(_src.type()) == CV_8U)
++        threshold_8U(_src, _dst, thresh, maxval, type);
++    if (CV_MAT_DEPTH(_src.type()) == CV_32F)
++        threshold_32F(_src, _dst, thresh, maxval, type);
++    return 0;
++}
++}  // namespace cv
++
+ double cv::threshold( InputArray _src, OutputArray _dst, double thresh, double maxval, int type )
+ {
++    int retcode = cv::kcv_threshold(_src, _dst, thresh, maxval, type);
++    if(retcode == 0 || retcode == 1)
++        return thresh;
+     CV_INSTRUMENT_REGION();
+ 
+     CV_OCL_RUN_(_src.dims() <= 2 && _dst.isUMat(),
